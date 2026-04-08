@@ -1,0 +1,67 @@
+services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    restart: unless-stopped
+    ports:
+      - "3011:3000"
+    environment:
+      - REACT_APP_BACKEND_URL=http://localhost:3010
+      - CHOKIDAR_USEPOLLING=true
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+    networks:
+      - domus-dev
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    restart: unless-stopped
+    ports:
+      - "3010:3000"
+    environment:
+      - DB_HOST=db
+      - DB_USER=domus
+      - DB_PASSWORD=domus_dev
+      - DB_NAME=domus_dev
+      - DB_PORT=5432
+      - JWT_SECRET=dev_secret_change_in_prod
+      - FRONTEND_URL=http://localhost:3011
+      - PORT=3000
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - domus-dev
+
+  db:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=domus
+      - POSTGRES_PASSWORD=domus_dev
+      - POSTGRES_DB=domus_dev
+    ports:
+      - "5433:5432"
+    volumes:
+      - domus_dev_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U domus"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - domus-dev
+
+networks:
+  domus-dev:
+    driver: bridge
+
+volumes:
+  domus_dev_data:

@@ -1,0 +1,372 @@
+:root {
+  --domus-primary: #4f46e5;
+  --domus-primary-dark: #3730a3;
+  --domus-secondary: #f59e0b;
+  --domus-bg: #f8fafc;
+  --domus-sidebar-bg: #1e1b4b;
+  --domus-sidebar-text: #c7d2fe;
+  --domus-sidebar-active: #4f46e5;
+  --domus-card-bg: #ffffff;
+  --domus-text: #1e293b;
+  --domus-muted: #64748b;
+  --domus-border: #e2e8f0;
+  --domus-input-bg: #ffffff;
+  --domus-income-bg: #d1fae5;
+  --domus-expense-bg: #fee2e2;
+  --domus-calendar-today: #ede9fe;
+}
+
+[data-theme="dark"] {
+  --domus-bg: #0f172a;
+  --domus-sidebar-bg: #0a0820;
+  --domus-sidebar-text: #a5b4fc;
+  --domus-sidebar-active: #4f46e5;
+  --domus-card-bg: #1e293b;
+  --domus-text: #f1f5f9;
+  --domus-muted: #94a3b8;
+  --domus-border: #334155;
+  --domus-input-bg: #1e293b;
+  --domus-income-bg: #064e3b;
+  --domus-expense-bg: #450a0a;
+  --domus-calendar-today: #312e81;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  font-family: 'Inter', sans-serif;
+  background-color: var(--domus-bg);
+  color: var(--domus-text);
+  margin: 0;
+}
+
+/* Sidebar */
+.domus-sidebar {
+  width: 240px;
+  min-height: 100vh;
+  background: var(--domus-sidebar-bg);
+  color: var(--domus-sidebar-text);
+  display: flex;
+  flex-direction: column;
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 100;
+  transition: width 0.2s;
+}
+
+.domus-sidebar .logo {
+  padding: 1.5rem 1.25rem 1rem;
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: #fff;
+  letter-spacing: -0.5px;
+  border-bottom: 1px solid rgba(255,255,255,0.1);
+}
+
+.domus-sidebar .logo span { color: var(--domus-secondary); }
+
+.domus-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1.25rem;
+  color: var(--domus-sidebar-text);
+  text-decoration: none;
+  border-radius: 0;
+  transition: background 0.15s, color 0.15s;
+  font-size: 0.925rem;
+  border: none;
+  background: none;
+  width: 100%;
+  cursor: pointer;
+}
+
+.domus-nav-item:hover {
+  background: rgba(255,255,255,0.08);
+  color: #fff;
+}
+
+.domus-nav-item.active {
+  background: var(--domus-primary);
+  color: #fff;
+}
+
+.domus-nav-item .nav-icon { font-size: 1.1rem; width: 1.5rem; text-align: center; }
+
+/* Layout */
+.domus-layout {
+  display: flex;
+  min-height: 100vh;
+}
+
+.domus-main {
+  margin-left: 240px;
+  flex: 1;
+  padding: 2rem;
+  min-height: 100vh;
+}
+
+.domus-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 2rem;
+}
+
+.domus-page-title {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--domus-text);
+  margin: 0;
+}
+
+/* Cards */
+.domus-card {
+  background: var(--domus-card-bg);
+  border: 1px solid var(--domus-border);
+  border-radius: 12px;
+  padding: 1.5rem;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
+
+.domus-stat-card {
+  background: var(--domus-card-bg);
+  border-radius: 12px;
+  padding: 1.25rem 1.5rem;
+  border: 1px solid var(--domus-border);
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.domus-stat-icon {
+  width: 48px;
+  height: 48px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.4rem;
+  flex-shrink: 0;
+}
+
+.domus-stat-value {
+  font-size: 1.5rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.domus-stat-label {
+  font-size: 0.8rem;
+  color: var(--domus-muted);
+  margin-top: 0.2rem;
+}
+
+/* Login */
+.domus-login-page {
+  min-height: 100vh;
+  background: linear-gradient(135deg, #1e1b4b 0%, #312e81 50%, #4f46e5 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.domus-login-card {
+  background: var(--domus-card-bg);
+  border-radius: 20px;
+  padding: 2.5rem;
+  width: 100%;
+  max-width: 420px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+  color: var(--domus-text);
+}
+
+.domus-login-logo {
+  text-align: center;
+  font-size: 2rem;
+  font-weight: 800;
+  color: var(--domus-primary);
+  margin-bottom: 0.25rem;
+}
+
+.domus-login-logo span { color: var(--domus-secondary); }
+
+/* Buttons */
+.btn-domus {
+  background: var(--domus-primary);
+  border-color: var(--domus-primary);
+  color: #fff;
+  font-weight: 500;
+  border-radius: 8px;
+  padding: 0.5rem 1.25rem;
+}
+
+.btn-domus:hover {
+  background: var(--domus-primary-dark);
+  border-color: var(--domus-primary-dark);
+  color: #fff;
+}
+
+/* Finance colors */
+.text-income { color: #10b981; }
+.text-expense { color: #ef4444; }
+.bg-income { background: var(--domus-income-bg); }
+.bg-expense { background: var(--domus-expense-bg); }
+
+/* Calendar overrides */
+.rbc-calendar { border-radius: 12px; overflow: hidden; }
+.rbc-header { background: var(--domus-primary); color: #fff; padding: 0.5rem; }
+.rbc-today { background: var(--domus-calendar-today); }
+
+[data-theme="dark"] .rbc-month-view,
+[data-theme="dark"] .rbc-time-view,
+[data-theme="dark"] .rbc-agenda-view {
+  border-color: var(--domus-border);
+  background: var(--domus-card-bg);
+  color: var(--domus-text);
+}
+
+[data-theme="dark"] .rbc-off-range-bg {
+  background: rgba(0,0,0,0.25);
+}
+
+[data-theme="dark"] .rbc-day-bg {
+  border-color: var(--domus-border);
+}
+
+[data-theme="dark"] .rbc-month-row {
+  border-color: var(--domus-border);
+}
+
+[data-theme="dark"] .rbc-date-cell {
+  color: var(--domus-text);
+}
+
+[data-theme="dark"] .rbc-off-range {
+  color: var(--domus-muted);
+}
+
+[data-theme="dark"] .rbc-toolbar button {
+  color: var(--domus-text);
+  border-color: var(--domus-border);
+  background: var(--domus-card-bg);
+}
+
+[data-theme="dark"] .rbc-toolbar button:hover {
+  background: rgba(79,70,229,0.15);
+  color: var(--domus-text);
+}
+
+[data-theme="dark"] .rbc-toolbar button.rbc-active {
+  background: var(--domus-primary);
+  color: #fff;
+  border-color: var(--domus-primary);
+}
+
+[data-theme="dark"] .rbc-toolbar button.rbc-active:hover {
+  background: var(--domus-primary-dark);
+}
+
+[data-theme="dark"] .rbc-show-more {
+  color: var(--domus-primary);
+}
+
+[data-theme="dark"] .rbc-event {
+  background: var(--domus-primary);
+}
+
+[data-theme="dark"] .rbc-time-slot {
+  border-color: var(--domus-border);
+  color: var(--domus-muted);
+}
+
+[data-theme="dark"] .rbc-timeslot-group {
+  border-color: var(--domus-border);
+}
+
+[data-theme="dark"] .rbc-time-header-content,
+[data-theme="dark"] .rbc-time-content {
+  border-color: var(--domus-border);
+}
+
+[data-theme="dark"] .rbc-agenda-table {
+  border-color: var(--domus-border);
+  color: var(--domus-text);
+}
+
+[data-theme="dark"] .rbc-agenda-table tbody > tr > td {
+  border-color: var(--domus-border);
+}
+
+[data-theme="dark"] .rbc-agenda-date-cell,
+[data-theme="dark"] .rbc-agenda-time-cell {
+  color: var(--domus-muted);
+}
+
+/* Dark mode Bootstrap form overrides */
+[data-theme="dark"] .form-control,
+[data-theme="dark"] .form-select {
+  background-color: var(--domus-input-bg);
+  border-color: var(--domus-border);
+  color: var(--domus-text);
+}
+
+[data-theme="dark"] .form-control:focus,
+[data-theme="dark"] .form-select:focus {
+  background-color: var(--domus-input-bg);
+  border-color: var(--domus-primary);
+  color: var(--domus-text);
+  box-shadow: 0 0 0 0.25rem rgba(79, 70, 229, 0.25);
+}
+
+[data-theme="dark"] .form-control::placeholder {
+  color: var(--domus-muted);
+}
+
+[data-theme="dark"] .modal-content {
+  background-color: var(--domus-card-bg);
+  border-color: var(--domus-border);
+  color: var(--domus-text);
+}
+
+[data-theme="dark"] .modal-header,
+[data-theme="dark"] .modal-footer {
+  border-color: var(--domus-border);
+}
+
+[data-theme="dark"] .table {
+  color: var(--domus-text);
+  border-color: var(--domus-border);
+}
+
+[data-theme="dark"] .table-striped > tbody > tr:nth-of-type(odd) > * {
+  background-color: rgba(255,255,255,0.03);
+  color: var(--domus-text);
+}
+
+[data-theme="dark"] .dropdown-menu {
+  background-color: var(--domus-card-bg);
+  border-color: var(--domus-border);
+}
+
+[data-theme="dark"] .dropdown-item {
+  color: var(--domus-text);
+}
+
+[data-theme="dark"] .dropdown-item:hover {
+  background-color: rgba(79, 70, 229, 0.15);
+  color: var(--domus-text);
+}
+
+/* Sidebar footer */
+.sidebar-footer {
+  border-top: 1px solid rgba(255,255,255,0.1);
+  padding: 0.5rem 0;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .domus-sidebar { width: 100%; min-height: auto; position: relative; flex-direction: row; flex-wrap: wrap; }
+  .domus-main { margin-left: 0; padding: 1rem; }
+}
