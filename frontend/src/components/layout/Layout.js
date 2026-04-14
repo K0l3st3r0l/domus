@@ -1,7 +1,8 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { Outlet, NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { useTheme } from '../../context/ThemeContext';
+import apiClient from '../../utils/apiClient';
 
 const NAV_ITEMS = [
   { to: '/', icon: '🏠', label: 'Inicio', end: true },
@@ -11,6 +12,8 @@ const NAV_ITEMS = [
   { to: '/finances', icon: '💰', label: 'Finanzas' },
   { to: '/subscriptions', icon: '📋', label: 'Suscripciones' },
   { to: '/credits', icon: '🏦', label: 'Créditos' },
+  { to: '/school-sync', icon: '🎓', label: 'School Sync' },
+  { to: '/school-schedule', icon: '📚', label: 'Horario' },
   { to: '/family', icon: '👨‍👩‍👧‍👦', label: 'Familia' },
 ];
 
@@ -18,11 +21,28 @@ export default function Layout() {
   const { user, logout, isAdmin } = useAuth();
   const { theme, toggleTheme } = useTheme();
   const navigate = useNavigate();
+  const [disabledNav, setDisabledNav] = useState([]);
+
+  useEffect(() => {
+    const loadPermissions = async () => {
+      try {
+        const res = await apiClient.get('/users/nav-permissions');
+        setDisabledNav(res.data.disabled);
+      } catch (err) {
+        console.error('Error cargando permisos del menú:', err);
+      }
+    };
+    loadPermissions();
+  }, []);
 
   const handleLogout = () => {
     logout();
     navigate('/login');
   };
+
+  const visibleItems = isAdmin
+    ? NAV_ITEMS
+    : NAV_ITEMS.filter(item => !disabledNav.includes(item.to));
 
   return (
     <div className="domus-layout">
@@ -30,7 +50,7 @@ export default function Layout() {
       <nav className="domus-sidebar">
         <div className="logo">Domus<span>.</span></div>
         <div style={{ padding: '1rem 0', flex: 1 }}>
-          {NAV_ITEMS.map(item => (
+          {visibleItems.map(item => (
             <NavLink
               key={item.to}
               to={item.to}

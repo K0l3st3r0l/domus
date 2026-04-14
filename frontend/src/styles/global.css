@@ -365,6 +365,69 @@ body {
   padding: 0.5rem 0;
 }
 
+/* Bootstrap primary button → Domus primary color */
+.btn-primary {
+  background-color: var(--domus-primary);
+  border-color: var(--domus-primary);
+}
+.btn-primary:hover,
+.btn-primary:focus-visible {
+  background-color: var(--domus-primary-dark);
+  border-color: var(--domus-primary-dark);
+}
+.btn-primary:active,
+.btn-primary:not(:disabled):not(.disabled):active {
+  background-color: var(--domus-primary-dark);
+  border-color: var(--domus-primary-dark);
+}
+.btn-check:checked + .btn-primary,
+.btn-check:active + .btn-primary {
+  background-color: var(--domus-primary-dark);
+  border-color: var(--domus-primary-dark);
+}
+
+/* Bootstrap dark mode overrides */
+[data-theme="dark"] .btn-outline-secondary {
+  color: var(--domus-muted);
+  border-color: var(--domus-border);
+  background-color: transparent;
+}
+[data-theme="dark"] .btn-outline-secondary:hover,
+[data-theme="dark"] .btn-outline-secondary:focus-visible {
+  background-color: rgba(255, 255, 255, 0.08);
+  color: var(--domus-text);
+  border-color: var(--domus-border);
+}
+[data-theme="dark"] .btn-outline-secondary:active,
+[data-theme="dark"] .btn-outline-secondary:not(:disabled):not(.disabled):active {
+  background-color: rgba(255, 255, 255, 0.12);
+  color: var(--domus-text);
+  border-color: var(--domus-border);
+}
+
+[data-theme="dark"] .btn-outline-success {
+  color: #10b981;
+  border-color: #10b981;
+  background-color: transparent;
+}
+[data-theme="dark"] .btn-outline-success:hover,
+[data-theme="dark"] .btn-outline-success:focus-visible {
+  background-color: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+  border-color: #10b981;
+}
+
+[data-theme="dark"] .badge.bg-secondary {
+  background-color: var(--domus-border) !important;
+  color: var(--domus-text);
+}
+
+[data-theme="dark"] .alert-info {
+  background-color: rgba(79, 70, 229, 0.15);
+  border-color: rgba(79, 70, 229, 0.35);
+  color: var(--domus-text);
+}
+
 /* Responsive */
 @media (max-width: 768px) {
   .domus-sidebar { width: 100%; min-height: auto; position: relative; flex-direction: row; flex-wrap: wrap; }

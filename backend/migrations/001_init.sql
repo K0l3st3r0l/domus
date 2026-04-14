@@ -89,6 +89,13 @@ CREATE TABLE IF NOT EXISTS finance_transactions (
   created_at TIMESTAMP DEFAULT NOW()
 );
 
+-- Configuración general de la app
+CREATE TABLE IF NOT EXISTS app_settings (
+  key VARCHAR(100) PRIMARY KEY,
+  value JSONB NOT NULL DEFAULT '[]',
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
 -- Índices útiles
 CREATE INDEX IF NOT EXISTS idx_calendar_start ON calendar_events(start_time);
 CREATE INDEX IF NOT EXISTS idx_menu_week ON weekly_menu(week_start);

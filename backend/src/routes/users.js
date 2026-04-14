@@ -43,4 +43,34 @@ router.patch('/:id/toggle', authenticate, requireAdmin, async (req, res) => {
   }
 });
 
+// Obtener permisos del menú de navegación para miembros
+router.get('/nav-permissions', authenticate, async (req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT value FROM app_settings WHERE key = 'member_disabled_nav'"
+    );
+    const disabled = result.rows[0]?.value || [];
+    res.json({ disabled });
+  } catch (err) {
+    res.status(500).json({ error: 'Error del servidor' });
+  }
+});
+
+// Actualizar permisos del menú de navegación (solo admin)
+router.put('/nav-permissions', authenticate, requireAdmin, async (req, res) => {
+  const { disabled } = req.body;
+  if (!Array.isArray(disabled)) {
+    return res.status(400).json({ error: 'disabled debe ser un array' });
+  }
+  try {
+    await pool.query(
+      "INSERT INTO app_settings (key, value) VALUES ('member_disabled_nav', $1) ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()",
+      [JSON.stringify(disabled)]
+    );
+    res.json({ disabled });
+  } catch (err) {
+    res.status(500).json({ error: 'Error del servidor' });
+  }
+});
+
 module.exports = router;
