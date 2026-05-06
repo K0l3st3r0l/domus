@@ -96,15 +96,16 @@ body {
 
 /* Layout */
 .domus-layout {
-  display: flex;
   min-height: 100vh;
 }
 
 .domus-main {
   margin-left: 240px;
-  flex: 1;
+  width: calc(100% - 240px);
+  min-width: 0;
   padding: 2rem;
   min-height: 100vh;
+  overflow-x: hidden;
 }
 
 .domus-topbar {
@@ -218,6 +219,21 @@ body {
 .rbc-calendar { border-radius: 12px; overflow: hidden; }
 .rbc-header { background: var(--domus-primary); color: #fff; padding: 0.5rem; }
 .rbc-today { background: var(--domus-calendar-today); }
+.rbc-month-view,
+.rbc-time-view,
+.rbc-agenda-view {
+  min-width: 0;
+}
+
+.rbc-event {
+  min-width: 0;
+}
+
+.rbc-event-content {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 [data-theme="dark"] .rbc-month-view,
 [data-theme="dark"] .rbc-time-view,
@@ -428,8 +444,178 @@ body {
   color: var(--domus-text);
 }
 
-/* Responsive */
+/* =====================
+   Mobile header (hamburger)
+   ===================== */
+.domus-mobile-header {
+  display: none;
+}
+
+.domus-hamburger {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0.4rem;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  justify-content: center;
+}
+
+.domus-hamburger span {
+  display: block;
+  width: 22px;
+  height: 2px;
+  background: var(--domus-text);
+  border-radius: 2px;
+  transition: all 0.2s;
+}
+
+.domus-mobile-logo {
+  font-size: 1.3rem;
+  font-weight: 700;
+  color: var(--domus-primary);
+}
+
+.domus-mobile-logo span { color: var(--domus-secondary); }
+
+.domus-mobile-theme-btn {
+  background: none;
+  border: none;
+  font-size: 1.2rem;
+  cursor: pointer;
+  padding: 0.4rem;
+  line-height: 1;
+}
+
+.domus-sidebar-close {
+  display: none;
+  background: none;
+  border: none;
+  color: var(--domus-sidebar-text);
+  font-size: 1.1rem;
+  cursor: pointer;
+  margin-left: auto;
+  padding: 0.25rem 0.5rem;
+  line-height: 1;
+  opacity: 0.7;
+}
+
+.domus-sidebar-close:hover { opacity: 1; }
+
+/* Overlay behind sidebar on mobile */
+.domus-sidebar-overlay {
+  display: none;
+}
+
+/* =====================
+   Responsive – Mobile
+   ===================== */
 @media (max-width: 768px) {
-  .domus-sidebar { width: 100%; min-height: auto; position: relative; flex-direction: row; flex-wrap: wrap; }
-  .domus-main { margin-left: 0; padding: 1rem; }
+  /* Mobile top bar */
+  .domus-mobile-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.75rem 1rem;
+    background: var(--domus-card-bg);
+    border-bottom: 1px solid var(--domus-border);
+    position: sticky;
+    top: 0;
+    z-index: 90;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+  }
+
+  /* Sidebar hidden off-screen by default */
+  .domus-sidebar {
+    transform: translateX(-100%);
+    transition: transform 0.25s ease;
+    position: fixed;
+    top: 0;
+    left: 0;
+    height: 100%;
+    width: 260px;
+    z-index: 200;
+    overflow-y: auto;
+  }
+
+  .domus-sidebar.open {
+    transform: translateX(0);
+  }
+
+  .domus-sidebar-close {
+    display: block;
+  }
+
+  /* Overlay */
+  .domus-sidebar-overlay {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.45);
+    z-index: 199;
+    backdrop-filter: blur(2px);
+  }
+
+  /* Main content – no left margin */
+  .domus-main {
+    margin-left: 0;
+    width: 100%;
+    padding: 1rem;
+  }
+
+  /* Topbar stacking on small screens */
+  .domus-topbar {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+  }
+
+  .domus-page-title {
+    font-size: 1.2rem;
+  }
+
+  /* Stat cards: 2 per row on mobile */
+  .domus-stat-card {
+    padding: 1rem;
+  }
+
+  .domus-stat-value {
+    font-size: 1.15rem;
+  }
+
+  /* Cards: reduce padding */
+  .domus-card {
+    padding: 1rem;
+  }
+
+  /* Login page */
+  .domus-login-card {
+    padding: 1.75rem 1.25rem;
+    border-radius: 16px;
+    margin: 1rem;
+  }
+
+  /* Sidebar logo: flex row with close button */
+  .domus-sidebar .logo {
+    display: flex;
+    align-items: center;
+    padding: 1.25rem 1rem 1rem;
+  }
+}
+
+@media (max-width: 480px) {
+  .domus-main {
+    padding: 0.75rem;
+  }
+
+  .domus-stat-value {
+    font-size: 1rem;
+  }
+
+  .domus-login-card {
+    padding: 1.5rem 1rem;
+    margin: 0.5rem;
+  }
 }

@@ -7,7 +7,28 @@ const { authenticate } = require('../middleware/auth');
 router.get('/', authenticate, async (req, res) => {
   const { start, end } = req.query;
   try {
-    let query = 'SELECT e.*, u.name as creator_name FROM calendar_events e LEFT JOIN users u ON e.created_by = u.id';
+    let query = `SELECT e.*, u.name as creator_name,
+      sa.id as school_assignment_id,
+      sa.course_name,
+      COALESCE(sa.child_email, email_match.child_email) as child_email
+      FROM calendar_events e
+      LEFT JOIN users u ON e.created_by = u.id
+      LEFT JOIN school_assignments sa ON sa.calendar_event_id = e.id
+      LEFT JOIN LATERAL (
+        SELECT se.child_email
+        FROM school_emails se
+        WHERE se.user_id = e.created_by
+          AND e.title = ('🗓️ ' || COALESCE(se.subject, ''))
+          AND (
+            DATE(COALESCE(se.extracted_date, se.date)) = DATE(e.start_time)
+            OR COALESCE(se.ai_summary, se.snippet, 'Reunión detectada') = COALESCE(e.description, '')
+          )
+        ORDER BY
+          ABS(EXTRACT(EPOCH FROM (COALESCE(se.extracted_date, se.date) - e.start_time))) ASC,
+          se.updated_at DESC NULLS LAST,
+          se.id DESC
+        LIMIT 1
+      ) email_match ON true`;
     const params = [];
     if (start && end) {
       query += ' WHERE e.start_time >= $1 AND e.start_time <= $2';

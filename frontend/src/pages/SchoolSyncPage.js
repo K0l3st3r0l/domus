@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
-import { Button, Badge, Spinner, Alert, Modal, Form } from 'react-bootstrap';
+import { Button, Badge, Spinner, Alert, Modal, Form, OverlayTrigger, Tooltip } from 'react-bootstrap';
 import { toast } from 'react-toastify';
 import { useNavigate, useLocation } from 'react-router-dom';
 import apiClient from '../utils/apiClient';
@@ -208,6 +208,82 @@ function cleanPlainTextEmail(text) {
     .trim();
 }
 
+function renderPlainTextWithLinks(text) {
+  const urlRe = /(https?:\/\/[^\s<]+)/g;
+  const lines = cleanPlainTextEmail(text).split('\n');
+
+  return lines.map((line, lineIndex) => {
+    const parts = line.split(urlRe);
+    return (
+      <React.Fragment key={`line-${lineIndex}`}>
+        {parts.map((part, partIndex) => {
+          if (!part) return null;
+
+          const isUrl = urlRe.test(part);
+          urlRe.lastIndex = 0;
+          if (!isUrl) {
+            return <React.Fragment key={`text-${lineIndex}-${partIndex}`}>{part}</React.Fragment>;
+          }
+
+          const match = part.match(/^(https?:\/\/[^\s<]+?)([),.;!?]*)$/);
+          const href = match ? match[1] : part;
+          const suffix = match ? match[2] : '';
+
+          return (
+            <React.Fragment key={`link-${lineIndex}-${partIndex}`}>
+              <a href={href} target="_blank" rel="noreferrer" style={{ color: 'var(--domus-primary)' }}>
+                {href}
+              </a>
+              {suffix}
+            </React.Fragment>
+          );
+        })}
+        {lineIndex < lines.length - 1 && <br />}
+      </React.Fragment>
+    );
+  });
+}
+
+function buildEmailIframeSrcDoc(html) {
+  if (!html) return '';
+
+  const readingStyles = `
+    <style>
+      :root { color-scheme: light; }
+      html, body {
+        margin: 0;
+        padding: 0;
+        background: #ffffff !important;
+        color: #111827 !important;
+      }
+      body {
+        padding: 16px;
+        line-height: 1.6;
+      }
+      img {
+        max-width: 100%;
+        height: auto;
+      }
+      table {
+        max-width: 100%;
+      }
+      a {
+        color: #2563eb;
+      }
+    </style>
+  `;
+
+  if (/<head[\s>]/i.test(html)) {
+    return html.replace(/<head([^>]*)>/i, `<head$1>${readingStyles}`);
+  }
+
+  if (/<html[\s>]/i.test(html)) {
+    return html.replace(/<html([^>]*)>/i, `<html$1><head>${readingStyles}</head>`);
+  }
+
+  return `<!DOCTYPE html><html><head>${readingStyles}</head><body>${html}</body></html>`;
+}
+
 function timeAgo(dateStr) {
   if (!dateStr) return 'nunca';
   const diff = Date.now() - new Date(dateStr).getTime();
@@ -232,8 +308,12 @@ export default function SchoolSyncPage() {
   const [emails, setEmails] = useState([]);
   const [assignments, setAssignments] = useState([]);
   const [activeFilter, setActiveFilter] = useState('all');
+  const [typeFilter, setTypeFilter] = useState('all');
+  const [courseFilter, setCourseFilter] = useState('all');
+  const [mainView, setMainView] = useState('default'); // 'default' | 'by-subject'
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
+  const [syncProgressState, setSyncProgressState] = useState(null); // { pct, stepLabel }
   const [connecting, setConnecting] = useState(null);
 
   // Email modal
@@ -256,6 +336,13 @@ export default function SchoolSyncPage() {
   const [showScheduleModal, setShowScheduleModal] = useState(false);
   const [scheduleTab, setScheduleTab] = useState('anais_rehbein.ojeda@cicpm.cl');
   const [scheduleSaving, setScheduleSaving] = useState(false);
+
+  // Date range reprocessing
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
+  const [reprocessing, setReprocessing] = useState(false);
+  const [reprocessResult, setReprocessResult] = useState(null);
+  const [reprocessProgress, setReprocessProgress] = useState(null);
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -295,6 +382,8 @@ export default function SchoolSyncPage() {
       const child = KNOWN_CHILDREN.find(c => c.email === connectedEmail);
       toast.success(`✅ ${child?.name || connectedEmail} conectado correctamente`);
       navigate('/school-sync', { replace: true });
+      // Refresh connected state after OAuth callback
+      fetchStatus();
     } else if (errorParam) {
       const messages = {
         access_denied: 'Acceso denegado por el usuario',
@@ -305,7 +394,37 @@ export default function SchoolSyncPage() {
       toast.error(messages[errorParam] || `Error: ${errorParam}`);
       navigate('/school-sync', { replace: true });
     }
-  }, [location.search, navigate]);
+  }, [location.search, navigate, fetchStatus]);
+
+  // Auto-open email modal when arriving from calendar with ?openEmail=subject
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const openEmailSubject = params.get('openEmail');
+    if (!openEmailSubject || emails.length === 0) return;
+
+    const normalize = s => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const target = normalize(openEmailSubject);
+    const match = emails.find(e => normalize(e.subject).includes(target) || target.includes(normalize(e.subject)));
+    if (match) {
+      navigate('/school-sync', { replace: true });
+      handleOpenEmail(match);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [emails, location.search]);
+
+  // Auto-open assignment modal when arriving from calendar with ?openAssignment=id
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const openAssignmentId = params.get('openAssignment');
+    if (!openAssignmentId || assignments.length === 0) return;
+
+    const id = parseInt(openAssignmentId, 10);
+    const match = assignments.find(a => a.id === id);
+    if (match) {
+      navigate('/school-sync', { replace: true });
+      setAssignmentModal(match);
+    }
+  }, [assignments, location.search, navigate]);
 
   useEffect(() => {
     async function init() {
@@ -339,15 +458,83 @@ export default function SchoolSyncPage() {
 
   const handleSync = async () => {
     setSyncing(true);
+    setSyncProgressState({ pct: 0, stepLabel: 'Iniciando…' });
     try {
       await apiClient.post('/school-sync/sync');
-      toast.success('Sincronización completada');
-      await fetchStatus();
-      await fetchData(activeFilter === 'all' ? null : activeFilter);
+
+      // Poll /sync/progress until done (max 3 min)
+      const deadline = Date.now() + 3 * 60 * 1000;
+      const poll = async () => {
+        try {
+          const { data } = await apiClient.get('/school-sync/sync/progress');
+          setSyncProgressState({ pct: data.pct ?? 0, stepLabel: data.stepLabel || '' });
+          if (data.done || !data.running || Date.now() > deadline) {
+            await fetchStatus();
+            await fetchData(activeFilter === 'all' ? null : activeFilter);
+            if (data.error) {
+              toast.error(`Error: ${data.error}`);
+            } else {
+              toast.success('✅ Sincronización completada');
+            }
+            setSyncing(false);
+            setSyncProgressState(null);
+          } else {
+            setTimeout(poll, 2000);
+          }
+        } catch {
+          setSyncing(false);
+          setSyncProgressState(null);
+          toast.error('Error consultando estado de sincronización');
+        }
+      };
+      setTimeout(poll, 2000);
     } catch {
       toast.error('Error durante la sincronización');
-    } finally {
       setSyncing(false);
+      setSyncProgressState(null);
+    }
+  };
+
+  const handleReprocess = async () => {
+    if (!dateFrom || !dateTo) {
+      toast.error('Selecciona ambas fechas');
+      return;
+    }
+    setReprocessing(true);
+    setReprocessResult(null);
+    setReprocessProgress(null);
+
+    try {
+      await apiClient.post('/school-sync/reprocess', { dateFrom, dateTo });
+
+      // Poll progress every 1.5s until done
+      const poll = async () => {
+        try {
+          const { data } = await apiClient.get('/school-sync/reprocess/progress');
+          setReprocessProgress(data);
+
+          if (data.done || !data.running) {
+            setReprocessing(false);
+            if (data.error) {
+              toast.error(`Error: ${data.error}`);
+            } else {
+              setReprocessResult({ processed: data.processed, eventsCreated: data.eventsCreated });
+              toast.success(`✓ ${data.processed} correos procesados, ${data.eventsCreated} eventos creados`);
+              await fetchData(activeFilter === 'all' ? null : activeFilter);
+            }
+          } else {
+            setTimeout(poll, 1500);
+          }
+        } catch {
+          setReprocessing(false);
+          toast.error('Error consultando progreso');
+        }
+      };
+
+      setTimeout(poll, 1000);
+    } catch {
+      setReprocessing(false);
+      toast.error('Error al iniciar reprocesamiento');
     }
   };
 
@@ -460,11 +647,16 @@ export default function SchoolSyncPage() {
     setAddingMeetingsBulk(true);
     try {
       let succeeded = 0;
+      const syncedIds = [];
       for (const id of ids) {
         await apiClient.post('/school-sync/sync-email-to-calendar', { emailId: id });
         succeeded++;
+        syncedIds.push(id);
       }
-      if (succeeded > 0) toast.success(`${succeeded} reunión(es) agregada(s) al calendario`);
+      if (succeeded > 0) {
+        toast.success(`${succeeded} reunión(es) agregada(s) al calendario`);
+        setEmails(prev => prev.map(e => syncedIds.includes(e.id) ? { ...e, synced_to_calendar: true } : e));
+      }
       setSelectedMeetingIds(new Set());
     } catch {
       toast.error('Error al agregar reuniones al calendario');
@@ -473,14 +665,60 @@ export default function SchoolSyncPage() {
     }
   };
 
-  // Client-side detection from loaded data (only last 30 days)
+  // Client-side detection from loaded data (only last 30 days, excluding already synced)
   const detectedMeetings = useMemo(() => {
     const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
     return emails.filter(e =>
       MEETING_RE.test(`${e.subject || ''} ${e.snippet || ''}`) &&
-      e.date && new Date(e.date).getTime() > cutoff
+      e.date && new Date(e.date).getTime() > cutoff &&
+      !e.synced_to_calendar
     );
   }, [emails]);
+
+  // Unique courses from assignments + Classroom announcement subjects
+  const uniqueCourses = useMemo(() => {
+    const fromAssignments = assignments.map(a => a.course_name).filter(Boolean);
+    // Classroom announcements have subjects like "CourseName: text…"
+    const fromEmails = emails
+      .filter(e => e.gmail_id && e.gmail_id.startsWith('classroom:ann:'))
+      .map(e => (e.subject || '').split(':')[0].trim())
+      .filter(Boolean);
+    const names = [...new Set([...fromAssignments, ...fromEmails])];
+    return names.sort((a, b) => a.localeCompare(b, 'es'));
+  }, [assignments, emails]);
+
+  // Normalize text for course matching (remove numbers, symbols, lowercase)
+  const normalizeCourse = (s) => (s || '').toLowerCase().replace(/[^a-záéíóúüñ\s]/gi, '').replace(/\s+/g, ' ').trim();
+
+  const filteredEmails = useMemo(() => {
+    return emails.filter(e => {
+      if (typeFilter === 'reunion') return e.ai_type === 'reunion' || MEETING_RE.test(`${e.subject || ''} ${e.snippet || ''}`);
+      if (typeFilter === 'tarea') return e.ai_type === 'tarea';
+      if (typeFilter === 'aviso') return e.ai_type === 'aviso';
+      return true;
+    });
+  }, [emails, typeFilter]);
+
+  const filteredAssignments = useMemo(() => {
+    if (courseFilter === 'all') return assignments;
+    return assignments.filter(a => a.course_name === courseFilter);
+  }, [assignments, courseFilter]);
+
+  // For by-subject view: group assignments + related emails by course
+  const subjectGroups = useMemo(() => {
+    return uniqueCourses.map(course => {
+      // Emails from Classroom notifications embed the full course name in the snippet.
+      // Match on the full normalized course name to avoid "Matemática" bleeding into
+      // "Taller de Matemática" (which share the word "matem").
+      const normalizedCourse = normalizeCourse(course);
+      const relatedEmails = emails.filter(e => {
+        const text = normalizeCourse(`${e.subject || ''} ${e.snippet || ''} ${e.ai_summary || ''}`);
+        return text.includes(normalizedCourse);
+      });
+      const courseAssignments = assignments.filter(a => a.course_name === course);
+      return { course, assignments: courseAssignments, emails: relatedEmails };
+    }).filter(g => g.assignments.length > 0 || g.emails.length > 0);
+  }, [uniqueCourses, assignments, emails]);
 
   if (loading) {
     return (
@@ -528,22 +766,22 @@ export default function SchoolSyncPage() {
     );
   }
 
-  const connectedEmails = connected.map(c => c.email);
+  const connectedEmails = connected.map(c => c.child_email);
   const lastSync = connected.reduce((latest, c) => {
     if (!c.last_sync) return latest;
     return !latest || new Date(c.last_sync) > new Date(latest) ? c.last_sync : latest;
   }, null);
   
-  // Separate overdue and pending assignments
-  const pendingAssignments = assignments.filter(a => {
+  // Separate overdue and pending — applied to the course-filtered set
+  const pendingAssignments = filteredAssignments.filter(a => {
     const overdue = a.due_date && new Date(a.due_date) < new Date();
     return !overdue;
   });
-  const overdueAssignments = assignments.filter(a => {
+  const overdueAssignments = filteredAssignments.filter(a => {
     const overdue = a.due_date && new Date(a.due_date) < new Date();
     return overdue;
   });
-  
+
   const unsyncedAssignments = pendingAssignments.filter(a => !a.synced_to_calendar);
   const selectedArray = [...selectedIds];
 
@@ -556,25 +794,39 @@ export default function SchoolSyncPage() {
           <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.4rem', flexWrap: 'wrap' }}>
             {KNOWN_CHILDREN.map(child => {
               const isLinked = connectedEmails.includes(child.email);
-              const info = connected.find(c => c.email === child.email);
+              const info = connected.find(c => c.child_email === child.email);
+              const isConnecting = connecting === child.email;
               return (
                 <span key={child.email} style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.85rem' }}>
-                  <Badge bg={isLinked ? 'success' : 'secondary'}>{child.name}</Badge>
                   {isLinked ? (
-                    <span
-                      style={{ cursor: 'pointer', color: '#ef4444', fontSize: '0.75rem' }}
-                      onClick={() => handleDisconnect(child.email)}
-                      title="Desconectar"
-                    >✕</span>
+                    <>
+                      <Button
+                        size="sm"
+                        variant="success"
+                        disabled={!!connecting}
+                        onClick={() => handleConnect(child)}
+                        title="Reconectar para actualizar permisos"
+                        style={{ fontSize: '0.75rem', padding: '0.15rem 0.5rem' }}
+                      >
+                        {isConnecting
+                          ? <><Spinner size="sm" animation="border" className="me-1" />Conectando...</>
+                          : `✓ ${child.name}`}
+                      </Button>
+                      <span
+                        style={{ cursor: 'pointer', color: '#ef4444', fontSize: '0.75rem', lineHeight: 1 }}
+                        onClick={() => handleDisconnect(child.email)}
+                        title="Desconectar cuenta"
+                      >✕</span>
+                    </>
                   ) : (
                     <Button
                       size="sm"
                       variant="outline-secondary"
-                      style={{ padding: '0 0.4rem', fontSize: '0.72rem' }}
+                      style={{ padding: '0.15rem 0.5rem', fontSize: '0.75rem' }}
                       disabled={!!connecting}
                       onClick={() => handleConnect(child)}
                     >
-                      {connecting === child.email ? <Spinner size="sm" animation="border" /> : '+ Conectar'}
+                      {isConnecting ? <><Spinner size="sm" animation="border" className="me-1" />Conectando...</> : `+ Conectar ${child.name}`}
                     </Button>
                   )}
                   {isLinked && info?.last_sync && (
@@ -600,18 +852,171 @@ export default function SchoolSyncPage() {
         </div>
       </div>
 
-      {/* Filters */}
-      <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.25rem', flexWrap: 'wrap' }}>
-        {[{ key: 'all', label: 'Todos' }, ...KNOWN_CHILDREN.map(c => ({ key: c.email, label: c.name }))].map(f => (
-          <Button
-            key={f.key}
+      {/* Sync progress bar */}
+      {syncing && syncProgressState && (
+        <div style={{ marginBottom: '1rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.3rem', fontSize: '0.8rem', color: 'var(--domus-muted)' }}>
+            <span>{syncProgressState.stepLabel}</span>
+            <span style={{ fontWeight: 600 }}>{syncProgressState.pct}%</span>
+          </div>
+          <div style={{ background: 'rgba(255,255,255,0.08)', borderRadius: 6, height: 8, overflow: 'hidden' }}>
+            <div style={{
+              height: '100%',
+              width: `${syncProgressState.pct}%`,
+              background: 'linear-gradient(90deg, #6366f1, #8b5cf6)',
+              borderRadius: 6,
+              transition: 'width 0.4s ease',
+            }} />
+          </div>
+        </div>
+      )}
+
+      {/* Date range reprocessing section */}
+      <div style={{
+        background: 'var(--domus-card-bg)',
+        border: '1px solid rgba(168,85,247,0.3)',
+        borderRadius: 8,
+        padding: '0.75rem 1rem',
+        marginBottom: '1.25rem',
+        display: 'flex',
+        alignItems: 'flex-end',
+        gap: '0.75rem',
+        flexWrap: 'wrap',
+      }}>
+        <Form.Group style={{ marginBottom: 0, minWidth: '150px' }}>
+          <Form.Label style={{ marginBottom: '0.25rem', fontSize: '0.8rem', color: 'var(--domus-muted)' }}>Desde:</Form.Label>
+          <Form.Control
+            type="date"
+            value={dateFrom}
+            onChange={(e) => setDateFrom(e.target.value)}
+            disabled={reprocessing}
             size="sm"
-            variant={activeFilter === f.key ? 'primary' : 'outline-secondary'}
-            onClick={() => setActiveFilter(f.key)}
-          >
-            {f.label}
-          </Button>
-        ))}
+          />
+        </Form.Group>
+        <Form.Group style={{ marginBottom: 0, minWidth: '150px' }}>
+          <Form.Label style={{ marginBottom: '0.25rem', fontSize: '0.8rem', color: 'var(--domus-muted)' }}>Hasta:</Form.Label>
+          <Form.Control
+            type="date"
+            value={dateTo}
+            onChange={(e) => setDateTo(e.target.value)}
+            disabled={reprocessing}
+            size="sm"
+          />
+        </Form.Group>
+        <Button
+          variant="outline-warning"
+          size="sm"
+          onClick={handleReprocess}
+          disabled={reprocessing || !dateFrom || !dateTo}
+          style={{ whiteSpace: 'nowrap' }}
+        >
+          {reprocessing ? (
+            <><Spinner size="sm" animation="border" className="me-1" />Procesando...</>
+          ) : (
+            '🤖 Reprocesar con IA'
+          )}
+        </Button>
+
+        {/* Progress bar shown while processing */}
+        {reprocessing && reprocessProgress?.total > 0 && (
+          <div style={{ flex: '1 1 200px', minWidth: 180 }}>
+            <div style={{ fontSize: '0.75rem', color: 'var(--domus-muted)', marginBottom: 4, display: 'flex', justifyContent: 'space-between' }}>
+              <span>{reprocessProgress.processed} / {reprocessProgress.total} correos</span>
+              <span>{Math.round((reprocessProgress.processed / reprocessProgress.total) * 100)}%</span>
+            </div>
+            <div style={{ background: 'rgba(255,255,255,0.1)', borderRadius: 4, height: 8, overflow: 'hidden' }}>
+              <div style={{
+                background: 'linear-gradient(90deg, #f59e0b, #fbbf24)',
+                height: '100%',
+                width: `${Math.round((reprocessProgress.processed / reprocessProgress.total) * 100)}%`,
+                borderRadius: 4,
+                transition: 'width 0.5s ease',
+              }} />
+            </div>
+            {reprocessProgress.eventsCreated > 0 && (
+              <div style={{ fontSize: '0.7rem', color: '#f59e0b', marginTop: 3 }}>
+                🗓️ {reprocessProgress.eventsCreated} evento(s) creado(s)
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Reprocess result alert */}
+      {reprocessResult && (
+        <Alert variant="success" dismissible onClose={() => setReprocessResult(null)} style={{ marginBottom: '1.25rem' }}>
+          <strong>✅ Reprocesamiento completado</strong>
+          <br />
+          <span style={{ fontSize: '0.9rem' }}>
+            {reprocessResult.processed} correo(s) procesado(s) • {reprocessResult.eventsCreated} evento(s) creado(s)
+          </span>
+        </Alert>
+      )}
+
+      {/* Filters */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginBottom: '1.25rem' }}>
+        {/* Row 1: hijo + vista */}
+        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+            <span style={{ fontSize: '0.75rem', color: 'var(--domus-muted)', alignSelf: 'center' }}>Hijo:</span>
+            {[{ key: 'all', label: 'Todos' }, ...KNOWN_CHILDREN.map(c => ({ key: c.email, label: c.name }))].map(f => (
+              <Button key={f.key} size="sm"
+                variant={activeFilter === f.key ? 'primary' : 'outline-secondary'}
+                onClick={() => setActiveFilter(f.key)}
+              >{f.label}</Button>
+            ))}
+          </div>
+          <div style={{ display: 'flex', gap: '0.4rem' }}>
+            <Button size="sm"
+              variant={mainView === 'default' ? 'secondary' : 'outline-secondary'}
+              onClick={() => setMainView('default')}
+            >≡ Lista</Button>
+            <Button size="sm"
+              variant={mainView === 'by-subject' ? 'secondary' : 'outline-secondary'}
+              onClick={() => setMainView('by-subject')}
+            >📖 Por Materia</Button>
+          </div>
+        </div>
+
+        {mainView === 'default' && (
+          <>
+            {/* Row 2: tipo de mensaje */}
+            <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', alignItems: 'center' }}>
+              <span style={{ fontSize: '0.75rem', color: 'var(--domus-muted)', alignSelf: 'center' }}>Mensajes:</span>
+              {[
+                { key: 'all', label: 'Todos' },
+                { key: 'reunion', label: '🗓️ Reuniones' },
+                { key: 'tarea', label: '📝 Tareas/Pruebas' },
+                { key: 'aviso', label: '📢 Avisos' },
+              ].map(f => (
+                <Button key={f.key} size="sm"
+                  variant={typeFilter === f.key ? 'info' : 'outline-secondary'}
+                  onClick={() => setTypeFilter(f.key)}
+                  style={{ fontSize: '0.78rem' }}
+                >{f.label}</Button>
+              ))}
+            </div>
+            {/* Row 3: materia (solo si hay cursos) */}
+            {uniqueCourses.length > 0 && (
+              <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                <span style={{ fontSize: '0.75rem', color: 'var(--domus-muted)', alignSelf: 'center' }}>Materia:</span>
+                <Button size="sm"
+                  variant={courseFilter === 'all' ? 'success' : 'outline-secondary'}
+                  onClick={() => setCourseFilter('all')}
+                  style={{ fontSize: '0.78rem' }}
+                >Todas</Button>
+                {uniqueCourses.map(c => (
+                  <Button key={c} size="sm"
+                    variant={courseFilter === c ? 'success' : 'outline-secondary'}
+                    onClick={() => setCourseFilter(courseFilter === c ? 'all' : c)}
+                    style={{ fontSize: '0.78rem', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                    title={c}
+                  >{c.replace(/\s*\d{4}\s*$/, '').replace(/^(II?I?|IV|V?I?)\s*[°º]?\s*[A-Z]\s*/i, '')}</Button>
+                ))}
+              </div>
+            )}
+          </>
+        )}
       </div>
 
       {/* Detected meetings banner */}
@@ -664,16 +1069,112 @@ export default function SchoolSyncPage() {
         </div>
       )}
 
+      {/* ── By-subject view ── */}
+      {mainView === 'by-subject' && (
+        <div>
+          {subjectGroups.length === 0 ? (
+            <p style={{ color: 'var(--domus-muted)' }}>Sin datos por materia aún.</p>
+          ) : subjectGroups.map(({ course, assignments: cAssignments, emails: cEmails }) => (
+            <div key={course} style={{
+              background: 'var(--domus-card-bg)',
+              border: '1px solid var(--domus-border)',
+              borderRadius: 10,
+              marginBottom: '1.25rem',
+              overflow: 'hidden',
+            }}>
+              {/* Course header */}
+              <div style={{
+                background: 'rgba(99,102,241,0.15)',
+                borderBottom: '1px solid var(--domus-border)',
+                padding: '0.6rem 1rem',
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+              }}>
+                <strong style={{ fontSize: '0.95rem' }}>
+                  📖 {course.replace(/\s*\d{4}\s*$/, '')}
+                </strong>
+                <div style={{ display: 'flex', gap: '0.4rem' }}>
+                  {cAssignments.length > 0 && <Badge bg="success">{cAssignments.length} tarea(s)</Badge>}
+                  {cEmails.length > 0 && <Badge bg="secondary">{cEmails.length} mensaje(s)</Badge>}
+                </div>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: cEmails.length > 0 ? '1fr 1fr' : '1fr', gap: 0 }}>
+                {/* Assignments */}
+                {cAssignments.length > 0 && (
+                  <div style={{ padding: '0.75rem', borderRight: cEmails.length > 0 ? '1px solid var(--domus-border)' : 'none' }}>
+                    {cAssignments.map(task => (
+                      <div key={task.id} style={{
+                        padding: '0.5rem 0.75rem',
+                        marginBottom: '0.5rem',
+                        background: 'rgba(255,255,255,0.03)',
+                        borderRadius: 6,
+                        border: '1px solid var(--domus-border)',
+                        cursor: 'pointer',
+                      }} onClick={() => setAssignmentModal(task)}>
+                        <div style={{ fontWeight: 600, fontSize: '0.85rem', marginBottom: '0.15rem' }}>{task.title}</div>
+                        {task.due_date && (
+                          <div style={{ fontSize: '0.75rem', color: new Date(task.due_date) < new Date() ? '#ef4444' : '#10b981' }}>
+                            📅 {new Date(task.due_date).toLocaleDateString('es-CL', { weekday: 'short', day: 'numeric', month: 'short' })}
+                            {new Date(task.due_date) < new Date() ? ' · vencida' : ''}
+                          </div>
+                        )}
+                        {task.synced_to_calendar && <Badge bg="success" style={{ fontSize: '0.6rem', marginTop: 3 }}>✓ En calendario</Badge>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {/* Related emails */}
+                {cEmails.length > 0 && (
+                  <div style={{ padding: '0.75rem' }}>
+                    {cEmails.slice(0, 4).map(email => (
+                      <div key={email.id} style={{
+                        padding: '0.5rem 0.75rem',
+                        marginBottom: '0.5rem',
+                        background: 'rgba(255,255,255,0.03)',
+                        borderRadius: 6,
+                        border: '1px solid var(--domus-border)',
+                        cursor: 'pointer',
+                        fontSize: '0.82rem',
+                      }} onClick={() => handleOpenEmail(email)}>
+                        <div style={{ fontWeight: 600, marginBottom: '0.1rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {email.subject}
+                        </div>
+                        <div style={{ color: 'var(--domus-muted)', overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }}>
+                          {email.ai_summary || email.snippet}
+                        </div>
+                        {email.extracted_date && (
+                          <div style={{ fontSize: '0.72rem', color: '#f59e0b', marginTop: 2 }}>
+                            📅 {new Date(email.extracted_date).toLocaleDateString('es-CL', { weekday: 'short', day: 'numeric', month: 'short' })}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                    {cEmails.length > 4 && (
+                      <div style={{ fontSize: '0.75rem', color: 'var(--domus-muted)', textAlign: 'center' }}>
+                        +{cEmails.length - 4} mensaje(s) más
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Two-column content */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
+      {mainView === 'default' && <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
 
         {/* ── Emails column ── */}
         <div>
-          <h5 style={{ marginBottom: '1rem' }}>📧 Correos del colegio</h5>
-          {emails.length === 0 ? (
-            <p style={{ color: 'var(--domus-muted)' }}>No hay correos recientes.</p>
+          <h5 style={{ marginBottom: '0.5rem' }}>📧 Mensajes
+            {typeFilter !== 'all' && <Badge bg="info" style={{ marginLeft: 6, fontSize: '0.7rem' }}>{filteredEmails.length}</Badge>}
+          </h5>
+          {filteredEmails.length === 0 ? (
+            <p style={{ color: 'var(--domus-muted)' }}>No hay mensajes con ese filtro.</p>
           ) : (
-            emails.map(email => {
+            filteredEmails.map(email => {
               const text = `${email.subject || ''} ${email.snippet || ''}`;
               const isRecent = email.date && (Date.now() - new Date(email.date).getTime()) < 30 * 24 * 60 * 60 * 1000;
               const isMeeting = isRecent && MEETING_RE.test(text);
@@ -710,21 +1211,30 @@ export default function SchoolSyncPage() {
                     <div style={{ display: 'flex', gap: '0.3rem', flexShrink: 0 }}>
                       {isMeeting && <Badge bg="warning" text="dark" style={{ fontSize: '0.62rem' }}>🗓️ Reunión</Badge>}
                       {hasMaterials && <Badge bg="info" style={{ fontSize: '0.62rem' }}>📦 Materiales</Badge>}
+                      {email.ai_type === 'reunion' && !isMeeting && <Badge bg="warning" text="dark" style={{ fontSize: '0.62rem' }}>🤖 Reunión</Badge>}
+                      {email.ai_type === 'tarea' && <Badge bg="success" style={{ fontSize: '0.62rem' }}>🤖 Tarea</Badge>}
+                      {email.ai_type === 'aviso' && <Badge bg="secondary" style={{ fontSize: '0.62rem' }}>🤖 Aviso</Badge>}
                     </div>
                   </div>
                   <div style={{ fontSize: '0.78rem', color: 'var(--domus-muted)', marginBottom: '0.25rem' }}>
                     De: {email.from_address}
                   </div>
-                  {email.snippet && (
+                  {(email.ai_summary || email.snippet) && (
                     <div style={{
                       fontSize: '0.8rem',
-                      color: 'var(--domus-muted)',
+                      color: email.ai_summary ? 'var(--domus-text)' : 'var(--domus-muted)',
                       overflow: 'hidden',
                       display: '-webkit-box',
                       WebkitLineClamp: 2,
                       WebkitBoxOrient: 'vertical',
+                      marginBottom: email.extracted_date ? '0.2rem' : 0,
                     }}>
-                      {email.snippet}
+                      {email.ai_summary || email.snippet}
+                    </div>
+                  )}
+                  {email.extracted_date && (
+                    <div style={{ fontSize: '0.75rem', color: '#f59e0b', fontWeight: 500, marginBottom: '0.15rem' }}>
+                      📅 {new Date(email.extracted_date).toLocaleString('es-CL', { dateStyle: 'medium', timeStyle: 'short' })}
                     </div>
                   )}
                   <div style={{ fontSize: '0.72rem', color: 'var(--domus-muted)', marginTop: '0.35rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.5rem' }}>
@@ -899,7 +1409,7 @@ export default function SchoolSyncPage() {
             })              )}
             </>          )}
         </div>
-      </div>
+      </div>}
 
       {/* ── Email Reader Modal ── */}
       <Modal show={!!emailModal} onHide={() => setEmailModal(null)} size="lg" scrollable>
@@ -925,37 +1435,105 @@ export default function SchoolSyncPage() {
                 <strong>Fecha:</strong><span>{emailModal.email.date ? new Date(emailModal.email.date).toLocaleString('es-CL') : '—'}</span>
                 <strong>Para:</strong><Badge bg={CHILD_BADGE_COLORS[emailModal.email.child_email] || 'secondary'}>{KNOWN_CHILDREN.find(c => c.email === emailModal.email.child_email)?.name || emailModal.email.child_email}</Badge>
               </div>
+
+              {/* AI Summary block */}
+              {emailModal?.email?.ai_summary && (
+                <div style={{
+                  background: 'rgba(168,85,247,0.08)',
+                  border: '1px solid rgba(168,85,247,0.25)',
+                  borderRadius: 8,
+                  padding: '0.65rem 0.9rem',
+                  marginBottom: '1rem',
+                  fontSize: '0.85rem',
+                }}>
+                  <div style={{ fontWeight: 600, marginBottom: '0.25rem', color: 'var(--domus-text)' }}>
+                    🤖 Resumen IA
+                  </div>
+                  <div style={{ color: 'var(--domus-text)' }}>{emailModal.email.ai_summary}</div>
+                  {emailModal.email.extracted_date && (
+                    <div style={{ marginTop: '0.4rem', color: '#f59e0b', fontWeight: 500, fontSize: '0.82rem' }}>
+                      📅 Evento: {new Date(emailModal.email.extracted_date).toLocaleString('es-CL', { dateStyle: 'full', timeStyle: 'short' })}
+                    </div>
+                  )}
+                  {emailModal.email.ai_type && (
+                    <div style={{ marginTop: '0.3rem', fontSize: '0.75rem', color: 'var(--domus-muted)' }}>
+                      Tipo: <strong>{emailModal.email.ai_type}</strong>
+                    </div>
+                  )}
+                </div>
+              )}
+
               {emailModal.loading ? (
                 <div style={{ textAlign: 'center', padding: '3rem' }}>
                   <Spinner animation="border" variant="primary" />
                   <p style={{ color: 'var(--domus-muted)', marginTop: '0.75rem', marginBottom: 0 }}>Cargando correo...</p>
                 </div>
-              ) : emailModal.htmlBody ? (
-                <iframe
-                  srcDoc={emailModal.htmlBody}
-                  sandbox="allow-popups allow-popups-to-escape-sandbox"
-                  title="Contenido del correo"
-                  style={{ width: '100%', height: 520, border: 'none', borderRadius: 4 }}
-                />
-              ) : emailModal.body ? (
-                <pre style={{
-                  whiteSpace: 'pre-wrap',
-                  wordBreak: 'break-word',
-                  fontSize: '0.9rem',
-                  lineHeight: 1.65,
-                  color: 'var(--domus-text)',
-                  fontFamily: 'inherit',
-                  margin: 0,
-                }}>
-                  {cleanPlainTextEmail(emailModal.body)}
-                </pre>
               ) : (
-                <div>
-                  <p style={{ color: 'var(--domus-muted)', fontStyle: 'italic' }}>
-                    No se pudo cargar el contenido completo. Fragmento disponible:
-                  </p>
-                  <p style={{ margin: 0 }}>{emailModal.email.snippet}</p>
-                </div>
+                <>
+                  {/* Attachments: images and links from Classroom materials */}
+                  {(() => {
+                    const atts = Array.isArray(emailModal.email.attachments) ? emailModal.email.attachments : [];
+                    const images = atts.filter(a => a.type === 'image');
+                    const links  = atts.filter(a => a.type !== 'image');
+                    if (atts.length === 0) return null;
+                    return (
+                      <div style={{ marginBottom: '1rem' }}>
+                        {images.length > 0 && (
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', marginBottom: links.length ? '0.75rem' : 0 }}>
+                            {images.map((img, i) => (
+                              <a key={i} href={`https://drive.google.com/file/d/${img.id}/view`} target="_blank" rel="noreferrer">
+                                <img
+                                  src={img.thumbnailUrl}
+                                  alt={img.title || `Imagen ${i + 1}`}
+                                  style={{ maxWidth: '100%', maxHeight: 320, borderRadius: 6, border: '1px solid var(--domus-border)', display: 'block', cursor: 'pointer' }}
+                                  onError={e => { e.currentTarget.style.display = 'none'; }}
+                                />
+                              </a>
+                            ))}
+                          </div>
+                        )}
+                        {links.length > 0 && (
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem' }}>
+                            {links.map((m, i) => (
+                              <a key={i} href={m.url} target="_blank" rel="noreferrer"
+                                style={{ fontSize: '0.8rem', padding: '0.2rem 0.6rem', background: 'rgba(255,255,255,0.06)', border: '1px solid var(--domus-border)', borderRadius: 4, color: 'var(--domus-primary)', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}>
+                                {m.type === 'youtube' ? '▶' : m.type === 'form' ? '📋' : '🔗'} {m.title || m.url}
+                              </a>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+
+                  {emailModal.htmlBody ? (
+                    <iframe
+                      srcDoc={buildEmailIframeSrcDoc(emailModal.htmlBody)}
+                      sandbox="allow-popups allow-popups-to-escape-sandbox"
+                      title="Contenido del correo"
+                      style={{ width: '100%', height: 520, border: 'none', borderRadius: 4, backgroundColor: '#ffffff' }}
+                    />
+                  ) : emailModal.body ? (
+                    <div style={{
+                      whiteSpace: 'pre-wrap',
+                      wordBreak: 'break-word',
+                      fontSize: '0.9rem',
+                      lineHeight: 1.65,
+                      color: 'var(--domus-text)',
+                      fontFamily: 'inherit',
+                      margin: 0,
+                    }}>
+                      {renderPlainTextWithLinks(emailModal.body)}
+                    </div>
+                  ) : (
+                    <div>
+                      <p style={{ color: 'var(--domus-muted)', fontStyle: 'italic' }}>
+                        No se pudo cargar el contenido completo. Fragmento disponible:
+                      </p>
+                      <p style={{ margin: 0 }}>{emailModal.email.snippet}</p>
+                    </div>
+                  )}
+                </>
               )}
             </>
           )}

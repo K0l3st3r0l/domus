@@ -22,6 +22,7 @@ export default function Layout() {
   const { theme, toggleTheme } = useTheme();
   const navigate = useNavigate();
   const [disabledNav, setDisabledNav] = useState([]);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   useEffect(() => {
     const loadPermissions = async () => {
@@ -40,22 +41,49 @@ export default function Layout() {
     navigate('/login');
   };
 
+  const closeSidebar = () => setSidebarOpen(false);
+
   const visibleItems = isAdmin
     ? NAV_ITEMS
     : NAV_ITEMS.filter(item => !disabledNav.includes(item.to));
 
   return (
-    <div className="domus-layout">
+    <>
+      {/* Mobile header — fuera del flex layout para que quede encima, no al lado */}
+      <header className="domus-mobile-header">
+        <button
+          className="domus-hamburger"
+          onClick={() => setSidebarOpen(true)}
+          aria-label="Abrir menú"
+        >
+          <span /><span /><span />
+        </button>
+        <div className="domus-mobile-logo">Domus<span>.</span></div>
+        <button onClick={toggleTheme} className="domus-mobile-theme-btn" aria-label="Cambiar tema">
+          {theme === 'light' ? '🌙' : '☀️'}
+        </button>
+      </header>
+
+      <div className="domus-layout">
+      {/* Sidebar overlay */}
+      {sidebarOpen && (
+        <div className="domus-sidebar-overlay" onClick={closeSidebar} aria-hidden="true" />
+      )}
+
       {/* Sidebar */}
-      <nav className="domus-sidebar">
-        <div className="logo">Domus<span>.</span></div>
-        <div style={{ padding: '1rem 0', flex: 1 }}>
+      <nav className={`domus-sidebar${sidebarOpen ? ' open' : ''}`}>
+        <div className="logo">
+          Domus<span>.</span>
+          <button className="domus-sidebar-close" onClick={closeSidebar} aria-label="Cerrar menú">✕</button>
+        </div>
+        <div style={{ padding: '1rem 0', flex: 1, overflowY: 'auto' }}>
           {visibleItems.map(item => (
             <NavLink
               key={item.to}
               to={item.to}
               end={item.end}
               className={({ isActive }) => `domus-nav-item${isActive ? ' active' : ''}`}
+              onClick={closeSidebar}
             >
               <span className="nav-icon">{item.icon}</span>
               {item.label}
@@ -64,7 +92,11 @@ export default function Layout() {
         </div>
         {/* User section */}
         <div className="sidebar-footer">
-          <NavLink to="/profile" className={({ isActive }) => `domus-nav-item${isActive ? ' active' : ''}`}>
+          <NavLink
+            to="/profile"
+            className={({ isActive }) => `domus-nav-item${isActive ? ' active' : ''}`}
+            onClick={closeSidebar}
+          >
             <span className="nav-icon">{user?.avatar || '👤'}</span>
             <div style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.2 }}>
               <span style={{ fontSize: '0.85rem' }}>{user?.name}</span>
@@ -86,6 +118,7 @@ export default function Layout() {
       <main className="domus-main">
         <Outlet />
       </main>
-    </div>
+      </div>
+    </>
   );
 }

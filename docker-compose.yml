@@ -34,6 +34,8 @@ services:
       - PORT=3000
     env_file:
       - .env
+    volumes:
+      - ./logs:/app/logs
     depends_on:
       db:
         condition: service_healthy

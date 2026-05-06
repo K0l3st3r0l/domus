@@ -52,7 +52,67 @@ const LIDER_EXCLUDE_KEYWORDS = [
 
 const MONTH_MAP = { ene: 1, feb: 2, mar: 3, abr: 4, may: 5, jun: 6, jul: 7, ago: 8, sep: 9, oct: 10, nov: 11, dic: 12 };
 
+function parseCMRWebStatement(text) {
+  // Formato web de CMR Falabella: tabla con columnas separadas por tabulador
+  // Fecha de compras | Descripción | Persona | Monto total | Cuotas | Cuota a pagar
+  const transactions = [];
+  const lines = text.split('\n');
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    const lowerLine = trimmed.toLowerCase();
+
+    // Saltar fila de encabezado
+    if (lowerLine.startsWith('fecha de compras') || lowerLine.startsWith('descripción')) continue;
+
+    const parts = trimmed.split('\t').map(p => p.trim());
+
+    // Necesitamos al menos: fecha, descripción, persona, monto
+    if (parts.length < 4) continue;
+
+    const [dateStr, description, , amountStr] = parts;
+
+    // Validar formato de fecha DD/MM/YYYY
+    if (!/^\d{2}\/\d{2}\/20\d{2}$/.test(dateStr)) continue;
+
+    // Parsear monto: " $50" o " $40.000" → 50 o 40000
+    const cleanAmount = amountStr.replace(/\$/g, '').replace(/\s/g, '').replace(/\./g, '');
+    const amount = parseInt(cleanAmount, 10);
+    if (!amount || amount <= 0) continue;
+
+    // Convertir fecha DD/MM/YYYY → YYYY-MM-DD
+    const [day, mon, yr] = dateStr.split('/');
+    const date = `${yr}-${mon}-${day}`;
+
+    // Categorización automática
+    const descLower = description.toLowerCase();
+    let category = 'Otros gastos';
+    for (const { keywords, category: cat } of CATEGORY_RULES) {
+      if (keywords.some(kw => descLower.includes(kw))) { category = cat; break; }
+    }
+
+    transactions.push({
+      _id: Math.random().toString(36).slice(2, 11),
+      selected: true,
+      type: 'expense',
+      amount,
+      category,
+      description: description.trim(),
+      date,
+    });
+  }
+
+  return { transactions, detectedCredits: [] };
+}
+
 function parseFalabellaStatement(text) {
+  // Auto-detectar formato web (últimas transacciones desde el sitio CMR)
+  if (text.toLowerCase().includes('fecha de compras')) {
+    return parseCMRWebStatement(text);
+  }
+
   // Detecta líneas con fecha DD/MM/YYYY seguida de descripción, indicador T/A1, y monto
   const txRegex = /(\d{2}\/\d{2}\/20\d{2})\s+(.+?)\s+(T|A\d+)\s+([\d.]+)/;
   // Patrón de créditos: fecha + "Super avance..." + T + monto_original + saldo + cuotas + mes_fin + cuota_mensual
@@ -538,9 +598,19 @@ export default function FinancesPage() {
             </>
           ) : importStep === 1 ? (
             <>
-              <p style={{ color: '#64748b', fontSize: '0.9rem', marginBottom: '1rem' }}>
-                Abre el PDF del estado de cuenta en tu visor (Chrome, Adobe, etc.), selecciona todo el texto con{' '}
-                <kbd>Ctrl+A</kbd>, cópialo con <kbd>Ctrl+C</kbd> y pégalo aquí abajo.
+              <p style={{ color: '#64748b', fontSize: '0.9rem', marginBottom: '0.5rem' }}>
+                {importBank === 'falabella' ? (
+                  <>
+                    Puedes pegar el texto de <strong>dos formas</strong>:<br />
+                    <strong>· PDF:</strong> Abre el PDF en Chrome o Adobe, selecciona todo con <kbd>Ctrl+A</kbd> y pega aquí.<br />
+                    <strong>· Web CMR:</strong> En el sitio de CMR, selecciona la tabla de "Últimas transacciones" y pégala directamente.
+                  </>
+                ) : (
+                  <>
+                    Abre el PDF del estado de cuenta en tu visor (Chrome, Adobe, etc.), selecciona todo el texto con{' '}
+                    <kbd>Ctrl+A</kbd>, cópialo con <kbd>Ctrl+C</kbd> y pégalo aquí abajo.
+                  </>
+                )}
               </p>
               <Form.Control
                 as="textarea"

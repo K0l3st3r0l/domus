@@ -4,11 +4,14 @@ const { google } = require('googleapis');
 const jwt = require('jsonwebtoken');
 const pool = require('../models/db');
 const { authenticate } = require('../middleware/auth');
+const { processEmail, getTokenStats } = require('../services/ollamaService');
 
 const SCOPES = [
   'https://www.googleapis.com/auth/gmail.readonly',
   'https://www.googleapis.com/auth/classroom.courses.readonly',
   'https://www.googleapis.com/auth/classroom.coursework.me.readonly',
+  'https://www.googleapis.com/auth/classroom.announcements.readonly',
+  'https://www.googleapis.com/auth/drive.readonly',
 ];
 
 function getOAuth2Client() {
@@ -114,18 +117,42 @@ router.get('/callback', async (req, res) => {
 router.post('/sync', authenticate, async (req, res) => {
   try {
     const result = await pool.query(
-      'SELECT child_email FROM google_tokens WHERE user_id = $1',
+      'SELECT child_email, child_name FROM google_tokens WHERE user_id = $1',
       [req.user.id]
     );
 
-    for (const row of result.rows) {
-      await syncChild(req.user.id, row.child_email);
+    const children = result.rows;
+    const userId = req.user.id;
+
+    // Steps per child: auth, gmail, tareas, anuncios, IA = 5
+    const STEPS_PER_CHILD = 5;
+    syncProgress.set(userId, {
+      running: true, done: false,
+      completed: 0, total: children.length * STEPS_PER_CHILD,
+      stepLabel: 'Iniciando…', error: null,
+    });
+
+    // Respond immediately to avoid Cloudflare 524 timeout; sync runs in background
+    res.json({ success: true, synced: children.length, background: true });
+
+    const step = (label) => {
+      const prev = syncProgress.get(userId);
+      if (prev) syncProgress.set(userId, { ...prev, completed: prev.completed + 1, stepLabel: label });
+    };
+
+    for (const row of children) {
+      await syncChild(userId, row.child_email, step, row.child_name).catch(err =>
+        console.error(`Error en sync manual (${row.child_email}):`, err.message)
+      );
     }
 
-    res.json({ success: true, synced: result.rows.length });
+    const prev = syncProgress.get(userId);
+    if (prev) syncProgress.set(userId, { ...prev, running: false, done: true, stepLabel: '✅ Completado' });
   } catch (err) {
     console.error('Error en sync manual:', err);
-    res.status(500).json({ error: 'Error del servidor' });
+    const prev = syncProgress.get(req.user.id);
+    if (prev) syncProgress.set(req.user.id, { ...prev, running: false, done: true, error: err.message });
+    if (!res.headersSent) res.status(500).json({ error: 'Error del servidor' });
   }
 });
 
@@ -139,7 +166,7 @@ router.get('/emails', authenticate, async (req, res) => {
       query += ' AND child_email = $2';
       params.push(child);
     }
-    query += ' ORDER BY date DESC NULLS LAST LIMIT 50';
+    query += ' ORDER BY date DESC NULLS LAST LIMIT 200';
     const result = await pool.query(query, params);
     res.json(result.rows);
   } catch (err) {
@@ -223,6 +250,28 @@ router.get('/emails/:gmailId/body', authenticate, async (req, res) => {
       return res.json({ body: emailRow.body || null, htmlBody: emailRow.html_body || null });
     }
 
+    // Classroom announcements are synthetic records, not Gmail messages.
+    // Fetch them from Classroom and cache the full text locally.
+    if (gmailId.startsWith('classroom:ann:')) {
+      const [, , courseId, announcementId] = gmailId.split(':');
+      const auth = await getAuthClientForChild(req.user.id, emailRow.child_email);
+      const classroom = google.classroom({ version: 'v1', auth });
+      const detail = await classroom.courses.announcements.get({
+        courseId,
+        id: announcementId,
+      });
+
+      const bodyText = detail.data?.text || emailRow.snippet || null;
+      if (bodyText) {
+        pool.query(
+          'UPDATE school_emails SET body = $1 WHERE gmail_id = $2',
+          [bodyText, gmailId]
+        ).catch(err => console.error('Error caching classroom announcement body:', err.message));
+      }
+
+      return res.json({ body: bodyText, htmlBody: null });
+    }
+
     // Fetch full message from Gmail API
     const auth = await getAuthClientForChild(req.user.id, emailRow.child_email);
     const gmail = google.gmail({ version: 'v1', auth });
@@ -238,8 +287,8 @@ router.get('/emails/:gmailId/body', authenticate, async (req, res) => {
     // Cache both plain text and HTML body for future reads
     if (textBody || htmlBody) {
       pool.query(
-        'UPDATE school_emails SET body = $1, html_body = $2 WHERE gmail_id = $3',
-        [textBody || null, htmlBody || null, gmailId]
+        'UPDATE school_emails SET body = $1, html_body = $2, ai_processed = CASE WHEN ai_summary ILIKE $3 THEN false ELSE ai_processed END WHERE gmail_id = $4',
+        [textBody || null, htmlBody || null, '%incompleto%', gmailId]
       ).catch(err => console.error('Error caching email body:', err.message));
     }
 
@@ -310,11 +359,23 @@ router.post('/sync-email-to-calendar', authenticate, async (req, res) => {
     }
 
     const email = emailResult.rows[0];
-    const startTime = email.date || new Date(); // Default to today if no date
+    const extractedDate = email.extracted_date || email.date || new Date();
+    const schedule = await getScheduleForChild(req.user.id, email.child_email);
+    const timing = inferCalendarTimingFromSchedule({
+      subject: email.subject,
+      summary: email.ai_summary || email.snippet || 'Reunión detectada',
+      extractedDate: new Date(extractedDate),
+      schedule,
+    });
     const eventResult = await pool.query(
-      `INSERT INTO calendar_events (title, description, start_time, all_day, color, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-      [`🗓️ ${email.subject}`, email.snippet || 'Reunión detectada', startTime, true, '#f59e0b', req.user.id]
+      `INSERT INTO calendar_events (title, description, start_time, end_time, all_day, color, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [`🗓️ ${email.subject}`, email.ai_summary || email.snippet || 'Reunión detectada', timing.startTime, timing.endTime, timing.allDay, '#f59e0b', req.user.id]
+    );
+
+    await pool.query(
+      'UPDATE school_emails SET synced_to_calendar = true WHERE id = $1',
+      [emailId]
     );
 
     res.json({ success: true, eventId: eventResult.rows[0].id });
@@ -396,6 +457,76 @@ router.delete('/disconnect', authenticate, async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: 'Error del servidor' });
   }
+});
+
+// GET /api/school-sync/token-stats — AI token usage stats for tuning max_tokens
+router.get('/token-stats', authenticate, async (req, res) => {
+  const stats = getTokenStats();
+  if (!stats) return res.json({ message: 'Sin datos aún. Procesa algunos correos primero.' });
+  res.json(stats);
+});
+
+// ─── In-memory reprocess progress store ──────────────────────────────────────
+// keyed by userId; cleared after client reads a completed job
+const reprocessProgress = new Map();
+
+// ─── In-memory sync progress store ──────────────────────────────────────────
+// { running, done, step, stepLabel, completed, total, childName, error }
+const syncProgress = new Map();
+
+// GET /api/school-sync/sync/progress
+router.get('/sync/progress', authenticate, (req, res) => {
+  const progress = syncProgress.get(req.user.id);
+  if (!progress) return res.json({ running: false, done: true, pct: 100 });
+  const pct = progress.total > 0 ? Math.round((progress.completed / progress.total) * 100) : 0;
+  res.json({ ...progress, pct });
+  if (progress.done) syncProgress.delete(req.user.id);
+});
+
+// GET /api/school-sync/reprocess/progress
+router.get('/reprocess/progress', authenticate, (req, res) => {
+  const progress = reprocessProgress.get(req.user.id);
+  if (!progress) return res.json({ running: false });
+
+  res.json(progress);
+
+  // Clean up once the client has seen the completed result
+  if (progress.done) reprocessProgress.delete(req.user.id);
+});
+
+// POST /api/school-sync/process-emails — process unread emails with AI
+router.post('/process-emails', authenticate, async (req, res) => {
+  try {
+    const result = await processUnreadEmails(req.user.id);
+    res.json({ success: true, processed: result.count, created: result.eventsCreated });
+  } catch (err) {
+    console.error('Error processing emails:', err);
+    res.status(500).json({ error: 'Error al procesar correos' });
+  }
+});
+
+// POST /api/school-sync/reprocess — starts background reprocess, returns immediately
+router.post('/reprocess', authenticate, (req, res) => {
+  const { dateFrom, dateTo } = req.body;
+  if (!dateFrom || !dateTo) {
+    return res.status(400).json({ error: 'dateFrom y dateTo requeridos' });
+  }
+
+  const userId = req.user.id;
+
+  if (reprocessProgress.get(userId)?.running) {
+    return res.status(409).json({ error: 'Ya hay un reprocesamiento en curso' });
+  }
+
+  reprocessProgress.set(userId, { running: true, done: false, total: 0, processed: 0, eventsCreated: 0, error: null });
+  res.json({ started: true });
+
+  // Run in background — no await
+  reprocessEmailsByRange(userId, dateFrom, dateTo, reprocessProgress).catch(err => {
+    console.error('Error reprocessing emails:', err);
+    const prev = reprocessProgress.get(userId) || {};
+    reprocessProgress.set(userId, { ...prev, running: false, done: true, error: err.message });
+  });
 });
 
 // ─── Email body parsing helpers ──────────────────────────────────────────────
@@ -480,16 +611,265 @@ async function getAuthClientForChild(userId, childEmail) {
   return oauth2Client;
 }
 
+async function getScheduleForChild(userId, childEmail) {
+  const result = await pool.query(
+    'SELECT day_of_week, subject, start_time, end_time FROM school_schedules WHERE user_id = $1 AND child_email = $2 ORDER BY day_of_week, start_time',
+    [userId, childEmail]
+  );
+  return result.rows;
+}
+
+function normalizeSubject(str) {
+  return (str || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function subjectMatches(scheduleSubject, eventText) {
+  const normalizedSchedule = normalizeSubject(scheduleSubject);
+  const normalizedEvent = normalizeSubject(eventText);
+  if (!normalizedSchedule || !normalizedEvent) return false;
+  if (normalizedEvent.includes(normalizedSchedule) || normalizedSchedule.includes(normalizedEvent)) return true;
+
+  const scheduleWords = normalizedSchedule.split(' ').filter(word => word.length >= 4);
+  const eventWords = normalizedEvent.split(' ').filter(word => word.length >= 4);
+  return scheduleWords.some(scheduleWord =>
+    eventWords.some(eventWord =>
+      scheduleWord === eventWord || scheduleWord.startsWith(eventWord) || eventWord.startsWith(scheduleWord)
+    )
+  );
+}
+
+function inferCalendarTimingFromSchedule({ subject, summary, extractedDate, schedule }) {
+  if (!extractedDate || !(extractedDate instanceof Date) || Number.isNaN(extractedDate.getTime())) {
+    return { startTime: extractedDate, endTime: null, allDay: true };
+  }
+
+  const hasExplicitTime = extractedDate.getHours() !== 12 || extractedDate.getMinutes() !== 0;
+  if (hasExplicitTime || !Array.isArray(schedule) || schedule.length === 0) {
+    return { startTime: extractedDate, endTime: hasExplicitTime ? extractedDate : null, allDay: !hasExplicitTime };
+  }
+
+  const jsDay = extractedDate.getDay();
+  const dayOfWeek = jsDay === 0 ? 6 : jsDay - 1;
+  const candidateText = [subject, summary].filter(Boolean).join(' ');
+  const matchingSlot = schedule
+    .filter(slot => Number(slot.day_of_week) === dayOfWeek)
+    .find(slot => subjectMatches(slot.subject, candidateText));
+
+  if (!matchingSlot?.start_time) {
+    return { startTime: extractedDate, endTime: null, allDay: true };
+  }
+
+  const [startHour, startMinute] = matchingSlot.start_time.substring(0, 5).split(':').map(Number);
+  const startTime = new Date(extractedDate);
+  startTime.setHours(startHour, startMinute, 0, 0);
+
+  const endTime = new Date(startTime);
+  if (matchingSlot.end_time) {
+    const [endHour, endMinute] = matchingSlot.end_time.substring(0, 5).split(':').map(Number);
+    endTime.setHours(endHour, endMinute, 0, 0);
+  } else {
+    endTime.setMinutes(endTime.getMinutes() + 45);
+  }
+
+  return { startTime, endTime, allDay: false };
+}
+
+async function processUnreadEmails(userId) {
+  let processedCount = 0;
+  let eventsCreated = 0;
+
+  try {
+    const emails = await pool.query(
+      `SELECT id, child_email, subject, snippet, body, date FROM school_emails
+       WHERE user_id = $1
+         AND is_read = false
+         AND ai_processed = false
+         AND (date IS NULL OR date >= CURRENT_DATE - INTERVAL '60 days')
+       ORDER BY date ASC`,
+      [userId]
+    );
+
+    const scheduleCache = {};
+    for (const email of emails.rows) {
+      try {
+        if (!scheduleCache[email.child_email]) {
+          scheduleCache[email.child_email] = await getScheduleForChild(userId, email.child_email);
+        }
+        const schedule = scheduleCache[email.child_email];
+        // Use full body when cached; fall back to snippet
+        const content = email.body ? email.body.slice(0, 3000) : email.snippet;
+        const { extractedDate, type, summary, model } = await processEmail(email.subject, content, email.date, schedule);
+
+        // Save AI processing results
+        await pool.query(
+          `UPDATE school_emails
+           SET ai_processed = true, ai_summary = $1, extracted_date = $2, ai_model = $3, ai_type = $4
+           WHERE id = $5`,
+          [summary, extractedDate, model, type, email.id]
+        );
+        processedCount++;
+
+        // Auto-create calendar event if date was extracted and is in the future
+        if (extractedDate && extractedDate >= new Date()) {
+          try {
+            const timing = inferCalendarTimingFromSchedule({
+              subject: email.subject,
+              summary,
+              extractedDate,
+              schedule,
+            });
+            await pool.query(
+              `INSERT INTO calendar_events (title, description, start_time, end_time, all_day, color, created_by)
+               VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+              [`🗓️ ${email.subject}`, summary || 'Evento detectado por IA', timing.startTime, timing.endTime, timing.allDay, '#f59e0b', userId]
+            );
+            eventsCreated++;
+          } catch (err) {
+            console.error('Error creating calendar event:', err.message);
+          }
+        }
+      } catch (err) {
+        console.error(`Error processing email ${email.id}:`, err.message);
+      }
+    }
+
+    console.log(`✓ Processed ${processedCount} emails, created ${eventsCreated} calendar events`);
+    return { count: processedCount, eventsCreated };
+  } catch (err) {
+    console.error('Error in processUnreadEmails:', err.message);
+    throw err;
+  }
+}
+
+async function reprocessEmailsByRange(userId, dateFrom, dateTo, progressStore) {
+  let processedCount = 0;
+  let eventsCreated = 0;
+
+  const setProgress = (patch) => {
+    if (!progressStore) return;
+    progressStore.set(userId, { ...progressStore.get(userId), ...patch });
+  };
+
+  try {
+    const fromDate = new Date(dateFrom);
+    const toDate = new Date(dateTo);
+    toDate.setHours(23, 59, 59, 999);
+
+    const emails = await pool.query(
+      `SELECT id, child_email, subject, snippet, body, date FROM school_emails
+       WHERE user_id = $1
+         AND date >= $2
+         AND date <= $3
+       ORDER BY date ASC`,
+      [userId, fromDate, toDate]
+    );
+
+    setProgress({ total: emails.rows.length, processed: 0, eventsCreated: 0 });
+
+    const scheduleCache = {};
+    for (const email of emails.rows) {
+      try {
+        if (!scheduleCache[email.child_email]) {
+          scheduleCache[email.child_email] = await getScheduleForChild(userId, email.child_email);
+        }
+        const schedule = scheduleCache[email.child_email];
+        const content = email.body ? email.body.slice(0, 3000) : email.snippet;
+        const { extractedDate, type, summary, model } = await processEmail(email.subject, content, email.date, schedule);
+
+        await pool.query(
+          `UPDATE school_emails
+           SET ai_processed = true, ai_summary = $1, extracted_date = $2, ai_model = $3, ai_type = $4
+           WHERE id = $5`,
+          [summary, extractedDate, model, type, email.id]
+        );
+        processedCount++;
+        setProgress({ processed: processedCount });
+
+        if (extractedDate && extractedDate >= new Date()) {
+          try {
+            const existing = await pool.query(
+              `SELECT id FROM calendar_events
+               WHERE created_by = $1
+                 AND title LIKE $2
+                 AND start_time::date = $3::date`,
+              [userId, `%${email.subject}%`, extractedDate]
+            );
+
+            if (existing.rows.length === 0) {
+              const timing = inferCalendarTimingFromSchedule({
+                subject: email.subject,
+                summary,
+                extractedDate,
+                schedule,
+              });
+              await pool.query(
+                `INSERT INTO calendar_events (title, description, start_time, end_time, all_day, color, created_by)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+                [`🗓️ ${email.subject}`, summary || 'Evento detectado por IA', timing.startTime, timing.endTime, timing.allDay, '#f59e0b', userId]
+              );
+              eventsCreated++;
+              setProgress({ eventsCreated });
+            }
+          } catch (err) {
+            console.error('Error creating calendar event:', err.message);
+          }
+        }
+      } catch (err) {
+        console.error(`Error processing email ${email.id}:`, err.message);
+      }
+    }
+
+    setProgress({ running: false, done: true, processed: processedCount, eventsCreated });
+    console.log(`✓ Reprocessed ${processedCount} emails, created ${eventsCreated} calendar events`);
+    return { count: processedCount, eventsCreated };
+  } catch (err) {
+    console.error('Error in reprocessEmailsByRange:', err.message);
+    throw err;
+  }
+}
+
 async function syncGmail(userId, childEmail, auth) {
   const gmail = google.gmail({ version: 'v1', auth });
 
-  const listRes = await gmail.users.messages.list({
-    userId: 'me',
-    q: 'from:cicpm.cl OR from:classroom.google.com newer_than:30d',
-    maxResults: 30,
-  });
+  // Use narrow queries and dedupe the results to avoid Gmail search precedence issues.
+  // Parent-forwarded emails may not always keep mhrehbein@gmail.com in the From header,
+  // so we also search for the parent email anywhere in the message metadata/body.
+  const queries = [
+    { q: 'from:cicpm.cl newer_than:60d', includeSpamTrash: false },
+    { q: 'from:classroom.google.com newer_than:60d', includeSpamTrash: false },
+    { q: 'from:mhrehbein@gmail.com newer_than:60d', includeSpamTrash: true },
+    { q: 'mhrehbein@gmail.com newer_than:60d', includeSpamTrash: true },
+  ];
 
-  const messages = listRes.data.messages || [];
+  const seenIds = new Set();
+  const messages = [];
+
+  for (const { q, includeSpamTrash } of queries) {
+    let pageToken;
+    do {
+      const listRes = await gmail.users.messages.list({
+        userId: 'me',
+        q,
+        maxResults: 100,
+        pageToken,
+        ...(includeSpamTrash ? { includeSpamTrash: true } : {}),
+      });
+      for (const m of (listRes.data.messages || [])) {
+        if (!seenIds.has(m.id)) {
+          seenIds.add(m.id);
+          messages.push(m);
+        }
+      }
+      pageToken = listRes.data.nextPageToken;
+    } while (pageToken);
+  }
+
   for (const msg of messages) {
     const exists = await pool.query('SELECT id FROM school_emails WHERE gmail_id = $1', [msg.id]);
     if (exists.rows.length > 0) continue;
@@ -507,12 +887,13 @@ async function syncGmail(userId, childEmail, auth) {
 
     const rawDate = getHeader('Date');
     const parsedDate = rawDate ? new Date(rawDate) : null;
+    const isUnread = detail.data.labelIds?.includes('UNREAD') || false;
 
     await pool.query(
-      `INSERT INTO school_emails (user_id, child_email, gmail_id, from_address, subject, snippet, date)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO school_emails (user_id, child_email, gmail_id, from_address, subject, snippet, date, is_read)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        ON CONFLICT (gmail_id) DO NOTHING`,
-      [userId, childEmail, msg.id, getHeader('From'), getHeader('Subject'), detail.data.snippet, parsedDate]
+      [userId, childEmail, msg.id, getHeader('From'), getHeader('Subject'), detail.data.snippet, parsedDate, !isUnread]
     );
   }
 }
@@ -532,13 +913,18 @@ async function syncClassroom(userId, childEmail, auth) {
   for (const course of courses) {
     let works = [];
     try {
-      const res = await classroom.courses.courseWork.list({
-        courseId: course.id,
-        courseWorkStates: ['PUBLISHED'],
-        orderBy: 'updateTime desc',
-        pageSize: 20,
-      });
-      works = res.data.courseWork || [];
+      let cwPageToken;
+      do {
+        const res = await classroom.courses.courseWork.list({
+          courseId: course.id,
+          courseWorkStates: ['PUBLISHED'],
+          orderBy: 'updateTime desc',
+          pageSize: 100,
+          pageToken: cwPageToken,
+        });
+        (res.data.courseWork || []).forEach(w => works.push(w));
+        cwPageToken = res.data.nextPageToken;
+      } while (cwPageToken);
     } catch (err) {
       console.error(`Error obteniendo tareas del curso "${course.name}":`, err.message);
       continue;
@@ -569,13 +955,162 @@ async function syncClassroom(userId, childEmail, auth) {
   }
 }
 
-async function syncChild(userId, childEmail) {
+async function syncClassroomAnnouncements(userId, childEmail, auth) {
+  const classroom = google.classroom({ version: 'v1', auth });
+  const { analyzeImage } = require('../services/ollamaService');
+
+  let courses = [];
   try {
+    const res = await classroom.courses.list({ studentId: 'me', courseStates: ['ACTIVE'] });
+    courses = res.data.courses || [];
+  } catch (err) {
+    console.error(`Error obteniendo cursos para anuncios (${childEmail}):`, err.message);
+    return;
+  }
+
+  for (const course of courses) {
+    let announcements = [];
+    try {
+      let annPageToken;
+      do {
+        const res = await classroom.courses.announcements.list({
+          courseId: course.id,
+          announcementStates: ['PUBLISHED'],
+          orderBy: 'updateTime desc',
+          pageSize: 100,
+          pageToken: annPageToken,
+        });
+        (res.data.announcements || []).forEach(a => announcements.push(a));
+        annPageToken = res.data.nextPageToken;
+      } while (annPageToken);
+    } catch (err) {
+      if (err.code === 403) {
+        console.warn(`[school-sync] Sin permiso de anuncios para ${childEmail} — debe reconectarse para otorgar el nuevo scope.`);
+        return;
+      }
+      console.error(`Error obteniendo anuncios del curso "${course.name}":`, err.message);
+      continue;
+    }
+
+    for (const ann of announcements) {
+      const gmailId = `classroom:ann:${course.id}:${ann.id}`;
+
+      const annDate = ann.creationTime ? new Date(ann.creationTime) : null;
+      const annUpdateTime = ann.updateTime ? new Date(ann.updateTime) : annDate;
+      const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+      // Use updateTime for the age check so recently-modified old announcements are not skipped
+      const ageCheckDate = annUpdateTime || annDate;
+      if (ageCheckDate && ageCheckDate < thirtyDaysAgo) continue;
+
+      // Check if already stored and unchanged (compare updateTime to avoid re-processing)
+      const exists = await pool.query(
+        'SELECT id, updated_at FROM school_emails WHERE gmail_id = $1',
+        [gmailId]
+      );
+      if (exists.rows.length > 0 && annUpdateTime) {
+        const storedAt = exists.rows[0].updated_at ? new Date(exists.rows[0].updated_at) : null;
+        // Skip only if we already have a version as recent as the announcement's updateTime
+        if (storedAt && storedAt >= annUpdateTime) continue;
+      }
+
+      // Build snippet from text content
+      let snippet = (ann.text || '').slice(0, 500);
+
+      // Collect ALL Drive file materials (images by mimeType or by filename extension)
+      const allDriveFiles = (ann.materials || [])
+        .map(m => m.driveFile?.driveFile)
+        .filter(f => f?.id && (
+          /image\//i.test(f.mimeType || '') ||
+          /\.(jpe?g|png|gif|webp|bmp|svg)$/i.test(f.title || '')
+        ));
+
+      // Also collect non-image attachments (links, YouTube, forms, etc.) for display
+      const otherMaterials = (ann.materials || []).flatMap(m => {
+        if (m.link) return [{ type: 'link', title: m.link.title || m.link.url, url: m.link.url }];
+        if (m.youtubeVideo) return [{ type: 'youtube', title: m.youtubeVideo.title, url: `https://youtu.be/${m.youtubeVideo.id}` }];
+        if (m.form) return [{ type: 'form', title: m.form.title, url: m.form.formUrl }];
+        const df = m.driveFile?.driveFile;
+        if (df?.id && !allDriveFiles.find(f => f.id === df.id)) {
+          return [{ type: 'drive', title: df.title || df.id, url: df.alternateLink, id: df.id }];
+        }
+        return [];
+      });
+
+      // Build attachments array with thumbnail URLs for images
+      const attachments = [];
+      let accessToken = null;
+
+      if (allDriveFiles.length > 0) {
+        try {
+          const tokenResult = await auth.getAccessToken();
+          accessToken = tokenResult?.token || tokenResult?.credentials?.access_token;
+        } catch (err) {
+          console.error('Error obteniendo access token para imágenes:', err.message);
+        }
+
+        for (const file of allDriveFiles) {
+          const thumbnailUrl = `https://drive.google.com/thumbnail?id=${file.id}&sz=w1200`;
+          attachments.push({
+            type: 'image',
+            id: file.id,
+            title: file.title || file.id,
+            thumbnailUrl,
+            mimeType: file.mimeType || 'image/jpeg',
+          });
+
+          // Also describe with vision AI for searchability in snippet
+          if (accessToken) {
+            try {
+              const description = await analyzeImage(file.id, accessToken);
+              if (description) {
+                snippet += `\n[Imagen adjunta: ${description}]`;
+              }
+            } catch (err) {
+              console.error('Error analizando imagen de anuncio:', err.message);
+            }
+          }
+        }
+      }
+
+      // Add non-image materials to attachments too
+      for (const m of otherMaterials) attachments.push(m);
+
+      const subject = `${course.name}: ${(ann.text || '').slice(0, 60).replace(/\n/g, ' ')}…`;
+
+      await pool.query(
+        `INSERT INTO school_emails (user_id, child_email, gmail_id, from_address, subject, snippet, body, date, is_read, updated_at, attachments)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), $10)
+         ON CONFLICT (gmail_id) DO UPDATE SET
+           from_address = EXCLUDED.from_address,
+           subject      = EXCLUDED.subject,
+           snippet      = EXCLUDED.snippet,
+           body         = EXCLUDED.body,
+           date         = EXCLUDED.date,
+           attachments  = EXCLUDED.attachments,
+           updated_at   = NOW()`,
+        [userId, childEmail, gmailId, 'Classroom', subject, snippet, ann.text || null, annDate, false, JSON.stringify(attachments)]
+      );
+    }
+  }
+}
+
+async function syncChild(userId, childEmail, onStep = null, childName = null) {
+  const label = childName || childEmail.split('@')[0];
+  const step = (text) => { if (onStep) onStep(text); };
+  try {
+    step(`${label}: autenticando…`);
     const auth = await getAuthClientForChild(userId, childEmail);
-    await Promise.all([
-      syncGmail(userId, childEmail, auth),
-      syncClassroom(userId, childEmail, auth),
-    ]);
+    step(`${label}: descargando correos…`);
+    await syncGmail(userId, childEmail, auth);
+    step(`${label}: descargando tareas…`);
+    await syncClassroom(userId, childEmail, auth);
+    step(`${label}: descargando anuncios…`);
+    await syncClassroomAnnouncements(userId, childEmail, auth);
+    step(`${label}: procesando con IA…`);
+    // Process unread emails with AI after sync
+    await processUnreadEmails(userId).catch(err =>
+      console.error('Error processing emails with AI:', err.message)
+    );
     await pool.query(
       'UPDATE google_tokens SET last_sync = NOW() WHERE user_id = $1 AND child_email = $2',
       [userId, childEmail]
@@ -583,6 +1118,8 @@ async function syncChild(userId, childEmail) {
     console.log(`✓ Sync completado para ${childEmail}`);
   } catch (err) {
     console.error(`Error sincronizando ${childEmail}:`, err.message);
+    // Count remaining steps as completed so progress doesn't stall
+    if (onStep) { step(`${label}: error — ${err.message}`); }
   }
 }
 

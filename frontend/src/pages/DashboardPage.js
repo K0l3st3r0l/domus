@@ -5,7 +5,7 @@ import apiClient from '../utils/apiClient';
 import { useAuth } from '../context/AuthContext';
 
 export default function DashboardPage() {
-  const { user } = useAuth();
+  const { user, isAdmin } = useAuth();
   const [summary, setSummary] = useState(null);
   const [events, setEvents] = useState([]);
   const [menuToday, setMenuToday] = useState([]);
@@ -44,47 +44,49 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* Stats */}
-      <Row className="g-3 mb-4">
-        <Col md={3}>
-          <div className="domus-stat-card">
-            <div className="domus-stat-icon" style={{ background: '#d1fae5' }}>💰</div>
-            <div>
-              <div className="domus-stat-value text-income">{summary ? `${summary.income.toFixed(0)} CLP` : '—'}</div>
-              <div className="domus-stat-label">Ingresos del mes</div>
-            </div>
-          </div>
-        </Col>
-        <Col md={3}>
-          <div className="domus-stat-card">
-            <div className="domus-stat-icon" style={{ background: '#fee2e2' }}>📉</div>
-            <div>
-              <div className="domus-stat-value text-expense">{summary ? `${summary.expenses.toFixed(0)} CLP` : '—'}</div>
-              <div className="domus-stat-label">Gastos del mes</div>
-            </div>
-          </div>
-        </Col>
-        <Col md={3}>
-          <div className="domus-stat-card">
-            <div className="domus-stat-icon" style={{ background: '#ede9fe' }}>⚖️</div>
-            <div>
-              <div className="domus-stat-value" style={{ color: summary?.balance >= 0 ? '#10b981' : '#ef4444' }}>
-                {summary ? `${summary.balance.toFixed(0)} CLP` : '—'}
+      {/* Stats — solo admin */}
+      {isAdmin && (
+        <Row className="g-3 mb-4">
+          <Col md={3}>
+            <div className="domus-stat-card">
+              <div className="domus-stat-icon" style={{ background: '#d1fae5' }}>💰</div>
+              <div>
+                <div className="domus-stat-value text-income">{summary ? `${summary.income.toFixed(0)} CLP` : '—'}</div>
+                <div className="domus-stat-label">Ingresos del mes</div>
               </div>
-              <div className="domus-stat-label">Balance</div>
             </div>
-          </div>
-        </Col>
-        <Col md={3}>
-          <div className="domus-stat-card">
-            <div className="domus-stat-icon" style={{ background: '#fef3c7' }}>📅</div>
-            <div>
-              <div className="domus-stat-value">{events.length}</div>
-              <div className="domus-stat-label">Eventos próximos</div>
+          </Col>
+          <Col md={3}>
+            <div className="domus-stat-card">
+              <div className="domus-stat-icon" style={{ background: '#fee2e2' }}>📉</div>
+              <div>
+                <div className="domus-stat-value text-expense">{summary ? `${summary.expenses.toFixed(0)} CLP` : '—'}</div>
+                <div className="domus-stat-label">Gastos del mes</div>
+              </div>
             </div>
-          </div>
-        </Col>
-      </Row>
+          </Col>
+          <Col md={3}>
+            <div className="domus-stat-card">
+              <div className="domus-stat-icon" style={{ background: '#ede9fe' }}>⚖️</div>
+              <div>
+                <div className="domus-stat-value" style={{ color: summary?.balance >= 0 ? '#10b981' : '#ef4444' }}>
+                  {summary ? `${summary.balance.toFixed(0)} CLP` : '—'}
+                </div>
+                <div className="domus-stat-label">Balance</div>
+              </div>
+            </div>
+          </Col>
+          <Col md={3}>
+            <div className="domus-stat-card">
+              <div className="domus-stat-icon" style={{ background: '#fef3c7' }}>📅</div>
+              <div>
+                <div className="domus-stat-value">{events.length}</div>
+                <div className="domus-stat-label">Eventos próximos</div>
+              </div>
+            </div>
+          </Col>
+        </Row>
+      )}
 
       <Row className="g-3">
         {/* Próximos eventos */}
