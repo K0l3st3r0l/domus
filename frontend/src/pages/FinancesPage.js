@@ -324,7 +324,7 @@ export default function FinancesPage() {
   };
 
   // Handlers de importación
-  const handleAnalyze = () => {
+  const handleAnalyze = async () => {
     const bank = BANK_OPTIONS.find(b => b.id === importBank);
     if (!bank) {
       toast.error('Selecciona un banco');
@@ -335,16 +335,49 @@ export default function FinancesPage() {
       toast.warn('No se encontraron transacciones. Verifica que pegaste el texto completo del estado de cuenta.');
       return;
     }
-    setImportTxs(transactions);
+
+    // Verificar duplicados y categorías aprendidas en paralelo
+    try {
+      const descriptions = transactions.map(tx => tx.description).filter(Boolean);
+      const [checkRes, catRes] = await Promise.all([
+        apiClient.post('/finances/check-duplicates', { transactions }),
+        apiClient.post('/finances/categories-by-description', { descriptions }),
+      ]);
+
+      const duplicateSet = new Set(checkRes.data.duplicates.map(d => `${d.description}|${d.date}|${d.amount}`));
+      const learnedCategories = catRes.data; // { "COMPRA IONOS Inc.": "Servicios", ... }
+
+      const txsWithFlags = transactions.map(tx => {
+        const key = `${tx.description}|${tx.date}|${tx.amount}`;
+        const isDuplicate = duplicateSet.has(key);
+        const learnedCategory = learnedCategories[tx.description];
+        return {
+          ...tx,
+          isDuplicate,
+          selected: isDuplicate ? false : tx.selected,
+          category: learnedCategory || tx.category,
+          learnedCategory: !!learnedCategory,
+        };
+      });
+
+      setImportTxs(txsWithFlags);
+      if (checkRes.data.count > 0) {
+        toast.warn(`⚠️ ${checkRes.data.count} transacción(es) ya existen en la BD y han sido desmarcadas`);
+      }
+      const learnedCount = txsWithFlags.filter(tx => tx.learnedCategory && !tx.isDuplicate).length;
+      if (learnedCount > 0) {
+        toast.info(`🧠 ${learnedCount} categoría(s) aplicadas desde tu historial`);
+      }
+    } catch (err) {
+      console.error('Error en análisis:', err);
+      setImportTxs(transactions);
+    }
+
     setImportCredits(detectedCredits);
     setImportStep(2);
   };
 
   const toggleTx = (id) => setImportTxs(txs => txs.map(tx => tx._id === id ? { ...tx, selected: !tx.selected } : tx));
-  const toggleAll = () => {
-    const allSel = importTxs.every(tx => tx.selected);
-    setImportTxs(txs => txs.map(tx => ({ ...tx, selected: !allSel })));
-  };
   const updateCategory = (id, category) => setImportTxs(txs => txs.map(tx => tx._id === id ? { ...tx, category } : tx));
 
   const handleCreateCredit = async (credit) => {
@@ -659,9 +692,15 @@ export default function FinancesPage() {
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
                 <Form.Check
                   id="select-all"
-                  label={`Seleccionar todas (${importTxs.length})`}
-                  checked={importTxs.length > 0 && importTxs.every(tx => tx.selected)}
-                  onChange={toggleAll}
+                  label={`Seleccionar todas (${importTxs.filter(tx => !tx.isDuplicate).length})`}
+                  checked={importTxs.filter(tx => !tx.isDuplicate).length > 0 && importTxs.filter(tx => !tx.isDuplicate).every(tx => tx.selected)}
+                  onChange={(e) => {
+                    const nonDuplicates = importTxs.filter(tx => !tx.isDuplicate);
+                    const allSelected = nonDuplicates.length > 0 && nonDuplicates.every(tx => tx.selected);
+                    setImportTxs(txs => txs.map(tx =>
+                      tx.isDuplicate ? tx : { ...tx, selected: !allSelected }
+                    ));
+                  }}
                 />
                 <span style={{ fontSize: '0.875rem', fontWeight: 600, color: '#4f46e5' }}>
                   {selectedCount} seleccionadas · {formatCLP(selectedTotal)}
@@ -681,20 +720,39 @@ export default function FinancesPage() {
                   </thead>
                   <tbody>
                     {importTxs.map(tx => (
-                      <tr key={tx._id} style={{ opacity: tx.selected ? 1 : 0.35 }}>
+                      <tr key={tx._id} style={{
+                        opacity: tx.isDuplicate ? 0.4 : (tx.selected ? 1 : 0.6),
+                        background: tx.isDuplicate ? '#fee2e2' : 'transparent',
+                        transition: 'opacity 0.2s'
+                      }}>
                         <td style={{ padding: '0.4rem 0.75rem' }}>
-                          <Form.Check checked={tx.selected} onChange={() => toggleTx(tx._id)} />
+                          <Form.Check
+                            checked={tx.selected}
+                            onChange={() => toggleTx(tx._id)}
+                            disabled={tx.isDuplicate}
+                            title={tx.isDuplicate ? 'Duplicado detectado' : ''}
+                          />
                         </td>
                         <td style={{ fontSize: '0.8rem', whiteSpace: 'nowrap', verticalAlign: 'middle' }}>
                           {tx.date.split('-').reverse().join('/')}
+                          {tx.isDuplicate && <span title="Transacción duplicada" style={{ marginLeft: '0.3rem', color: '#ef4444', fontWeight: 'bold' }}>⚠️</span>}
                         </td>
-                        <td style={{ fontSize: '0.8rem', verticalAlign: 'middle' }}>{tx.description}</td>
+                        <td style={{ fontSize: '0.8rem', verticalAlign: 'middle' }}>
+                          {tx.description}
+                          {tx.isDuplicate && <div style={{ fontSize: '0.7rem', color: '#dc2626', marginTop: '0.2rem' }}>Duplicado: ya existe en BD</div>}
+                        </td>
                         <td style={{ verticalAlign: 'middle' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+                            {tx.learnedCategory && !tx.isDuplicate && (
+                              <span title="Categoría aprendida desde tu historial" style={{ fontSize: '0.85rem', cursor: 'default', flexShrink: 0 }}>🧠</span>
+                            )}
                           <Form.Select size="sm" value={tx.category}
                             onChange={e => updateCategory(tx._id, e.target.value)}
-                            style={{ fontSize: '0.78rem' }}>
+                            style={{ fontSize: '0.78rem' }}
+                            disabled={tx.isDuplicate}>
                             {categories.expense.map(c => <option key={c}>{c}</option>)}
                           </Form.Select>
+                          </div>
                         </td>
                         <td style={{ textAlign: 'right', fontSize: '0.85rem', fontWeight: 500, whiteSpace: 'nowrap', verticalAlign: 'middle' }}>
                           {formatCLP(tx.amount)}
@@ -706,7 +764,12 @@ export default function FinancesPage() {
               </div>
 
               <small style={{ color: '#94a3b8', marginTop: '0.5rem', display: 'block' }}>
-                Puedes cambiar la categoría de cada transacción antes de importar. Verifica que no hayas importado este período anteriormente para evitar duplicados.
+                Puedes cambiar la categoría de cada transacción antes de importar.
+                {importTxs.some(tx => tx.isDuplicate) && (
+                  <div style={{ marginTop: '0.5rem', padding: '0.5rem', background: '#fee2e2', borderRadius: 4, color: '#991b1b' }}>
+                    ⚠️ Las transacciones marcadas con ⚠️ ya existen en la BD (coinciden por empresa, fecha y monto) y han sido automáticamente desmarcadas.
+                  </div>
+                )}
               </small>
             </>
           )}
