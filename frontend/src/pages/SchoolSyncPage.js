@@ -311,6 +311,7 @@ export default function SchoolSyncPage() {
   const [typeFilter, setTypeFilter] = useState('all');
   const [courseFilter, setCourseFilter] = useState('all');
   const [mainView, setMainView] = useState('default'); // 'default' | 'by-subject'
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [syncProgressState, setSyncProgressState] = useState(null); // { pct, stepLabel }
@@ -550,11 +551,33 @@ export default function SchoolSyncPage() {
     }
   };
 
+  const handleDownloadAttachment = async (gmailId, att) => {
+    try {
+      const res = await apiClient.get(
+        `/school-sync/emails/${encodeURIComponent(gmailId)}/attachments/${encodeURIComponent(att.attachmentId)}`,
+        { responseType: 'blob' }
+      );
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = att.filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      toast.error('No se pudo descargar el adjunto');
+    }
+  };
+
   const handleOpenEmail = async (email) => {
     setEmailModal({ email, body: null, htmlBody: null, loading: true });
     try {
       const res = await apiClient.get(`/school-sync/emails/${email.gmail_id}/body`);
-      setEmailModal({ email, body: res.data.body, htmlBody: res.data.htmlBody, loading: false });
+      const gmailAtts = Array.isArray(res.data.attachments) ? res.data.attachments : [];
+      const existingAtts = Array.isArray(email.attachments) ? email.attachments : [];
+      const mergedEmail = gmailAtts.length
+        ? { ...email, attachments: [...existingAtts.filter(a => !a.attachmentId), ...gmailAtts] }
+        : email;
+      setEmailModal({ email: mergedEmail, body: res.data.body, htmlBody: res.data.htmlBody, loading: false });
     } catch {
       setEmailModal({ email, body: null, htmlBody: null, loading: false });
     }
@@ -796,21 +819,22 @@ export default function SchoolSyncPage() {
               const isLinked = connectedEmails.includes(child.email);
               const info = connected.find(c => c.child_email === child.email);
               const isConnecting = connecting === child.email;
+              const tokenInvalid = isLinked && info?.token_valid === false;
               return (
                 <span key={child.email} style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.85rem' }}>
                   {isLinked ? (
                     <>
                       <Button
                         size="sm"
-                        variant="success"
+                        variant={tokenInvalid ? 'danger' : 'success'}
                         disabled={!!connecting}
                         onClick={() => handleConnect(child)}
-                        title="Reconectar para actualizar permisos"
+                        title={tokenInvalid ? 'Token expirado — hacer clic para reconectar' : 'Reconectar para actualizar permisos'}
                         style={{ fontSize: '0.75rem', padding: '0.15rem 0.5rem' }}
                       >
                         {isConnecting
                           ? <><Spinner size="sm" animation="border" className="me-1" />Conectando...</>
-                          : `✓ ${child.name}`}
+                          : tokenInvalid ? `⚠ Reconectar ${child.name}` : `✓ ${child.name}`}
                       </Button>
                       <span
                         style={{ cursor: 'pointer', color: '#ef4444', fontSize: '0.75rem', lineHeight: 1 }}
@@ -954,17 +978,32 @@ export default function SchoolSyncPage() {
       )}
 
       {/* Filters */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginBottom: '1.25rem' }}>
-        {/* Row 1: hijo + vista */}
-        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between' }}>
-          <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
-            <span style={{ fontSize: '0.75rem', color: 'var(--domus-muted)', alignSelf: 'center' }}>Hijo:</span>
-            {[{ key: 'all', label: 'Todos' }, ...KNOWN_CHILDREN.map(c => ({ key: c.email, label: c.name }))].map(f => (
-              <Button key={f.key} size="sm"
-                variant={activeFilter === f.key ? 'primary' : 'outline-secondary'}
-                onClick={() => setActiveFilter(f.key)}
-              >{f.label}</Button>
-            ))}
+      <div style={{ marginBottom: '1.25rem' }}>
+        {/* Toggle bar */}
+        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', marginBottom: filtersOpen ? '0.5rem' : 0 }}>
+          <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', alignItems: 'center' }}>
+            <button
+              onClick={() => setFiltersOpen(o => !o)}
+              style={{ background: 'none', border: 'none', color: 'var(--domus-muted)', cursor: 'pointer', fontSize: '0.78rem', padding: '0.1rem 0.3rem', display: 'flex', alignItems: 'center', gap: '0.25rem' }}
+            >
+              <span style={{ display: 'inline-block', transition: 'transform 0.2s', transform: filtersOpen ? 'rotate(90deg)' : 'rotate(0deg)' }}>▶</span>
+              Filtros
+              {(activeFilter !== 'all' || typeFilter !== 'all' || courseFilter !== 'all') && (
+                <span style={{ background: 'var(--domus-primary)', color: '#fff', borderRadius: '50%', width: 14, height: 14, fontSize: '0.65rem', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
+                  {[activeFilter !== 'all', typeFilter !== 'all', courseFilter !== 'all'].filter(Boolean).length}
+                </span>
+              )}
+            </button>
+            {!filtersOpen && activeFilter !== 'all' && (
+              <span style={{ fontSize: '0.75rem', color: 'var(--domus-muted)' }}>
+                {KNOWN_CHILDREN.find(c => c.email === activeFilter)?.name}
+              </span>
+            )}
+            {!filtersOpen && courseFilter !== 'all' && (
+              <span style={{ fontSize: '0.75rem', color: 'var(--domus-muted)' }}>
+                · {courseFilter.replace(/\s*\d{4}\s*$/, '').replace(/^(II?I?|IV|V?I?)\s*[°º]?\s*[A-Z]\s*/i, '')}
+              </span>
+            )}
           </div>
           <div style={{ display: 'flex', gap: '0.4rem' }}>
             <Button size="sm"
@@ -978,44 +1017,59 @@ export default function SchoolSyncPage() {
           </div>
         </div>
 
-        {mainView === 'default' && (
-          <>
-            {/* Row 2: tipo de mensaje */}
+        {filtersOpen && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+            {/* Row 1: hijo */}
             <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', alignItems: 'center' }}>
-              <span style={{ fontSize: '0.75rem', color: 'var(--domus-muted)', alignSelf: 'center' }}>Mensajes:</span>
-              {[
-                { key: 'all', label: 'Todos' },
-                { key: 'reunion', label: '🗓️ Reuniones' },
-                { key: 'tarea', label: '📝 Tareas/Pruebas' },
-                { key: 'aviso', label: '📢 Avisos' },
-              ].map(f => (
+              <span style={{ fontSize: '0.75rem', color: 'var(--domus-muted)', alignSelf: 'center' }}>Hijo:</span>
+              {[{ key: 'all', label: 'Todos' }, ...KNOWN_CHILDREN.map(c => ({ key: c.email, label: c.name }))].map(f => (
                 <Button key={f.key} size="sm"
-                  variant={typeFilter === f.key ? 'info' : 'outline-secondary'}
-                  onClick={() => setTypeFilter(f.key)}
-                  style={{ fontSize: '0.78rem' }}
+                  variant={activeFilter === f.key ? 'primary' : 'outline-secondary'}
+                  onClick={() => setActiveFilter(f.key)}
                 >{f.label}</Button>
               ))}
             </div>
-            {/* Row 3: materia (solo si hay cursos) */}
-            {uniqueCourses.length > 0 && (
-              <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', alignItems: 'center' }}>
-                <span style={{ fontSize: '0.75rem', color: 'var(--domus-muted)', alignSelf: 'center' }}>Materia:</span>
-                <Button size="sm"
-                  variant={courseFilter === 'all' ? 'success' : 'outline-secondary'}
-                  onClick={() => setCourseFilter('all')}
-                  style={{ fontSize: '0.78rem' }}
-                >Todas</Button>
-                {uniqueCourses.map(c => (
-                  <Button key={c} size="sm"
-                    variant={courseFilter === c ? 'success' : 'outline-secondary'}
-                    onClick={() => setCourseFilter(courseFilter === c ? 'all' : c)}
-                    style={{ fontSize: '0.78rem', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-                    title={c}
-                  >{c.replace(/\s*\d{4}\s*$/, '').replace(/^(II?I?|IV|V?I?)\s*[°º]?\s*[A-Z]\s*/i, '')}</Button>
-                ))}
-              </div>
+
+            {mainView === 'default' && (
+              <>
+                {/* Row 2: tipo de mensaje */}
+                <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--domus-muted)', alignSelf: 'center' }}>Mensajes:</span>
+                  {[
+                    { key: 'all', label: 'Todos' },
+                    { key: 'reunion', label: '🗓️ Reuniones' },
+                    { key: 'tarea', label: '📝 Tareas/Pruebas' },
+                    { key: 'aviso', label: '📢 Avisos' },
+                  ].map(f => (
+                    <Button key={f.key} size="sm"
+                      variant={typeFilter === f.key ? 'info' : 'outline-secondary'}
+                      onClick={() => setTypeFilter(f.key)}
+                      style={{ fontSize: '0.78rem' }}
+                    >{f.label}</Button>
+                  ))}
+                </div>
+                {/* Row 3: materia */}
+                {uniqueCourses.length > 0 && (
+                  <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                    <span style={{ fontSize: '0.75rem', color: 'var(--domus-muted)', alignSelf: 'center' }}>Materia:</span>
+                    <Button size="sm"
+                      variant={courseFilter === 'all' ? 'success' : 'outline-secondary'}
+                      onClick={() => setCourseFilter('all')}
+                      style={{ fontSize: '0.78rem' }}
+                    >Todas</Button>
+                    {uniqueCourses.map(c => (
+                      <Button key={c} size="sm"
+                        variant={courseFilter === c ? 'success' : 'outline-secondary'}
+                        onClick={() => setCourseFilter(courseFilter === c ? 'all' : c)}
+                        style={{ fontSize: '0.78rem', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                        title={c}
+                      >{c.replace(/\s*\d{4}\s*$/, '').replace(/^(II?I?|IV|V?I?)\s*[°º]?\s*[A-Z]\s*/i, '')}</Button>
+                    ))}
+                  </div>
+                )}
+              </>
             )}
-          </>
+          </div>
         )}
       </div>
 
@@ -1470,16 +1524,28 @@ export default function SchoolSyncPage() {
                 </div>
               ) : (
                 <>
-                  {/* Attachments: images and links from Classroom materials */}
+                  {/* Attachments: images and links from Classroom, plus Gmail attachments */}
                   {(() => {
                     const atts = Array.isArray(emailModal.email.attachments) ? emailModal.email.attachments : [];
                     const images = atts.filter(a => a.type === 'image');
-                    const links  = atts.filter(a => a.type !== 'image');
+                    const gmailAtts = atts.filter(a => a.type === 'gmail');
+                    const links  = atts.filter(a => a.type !== 'image' && a.type !== 'gmail');
                     if (atts.length === 0) return null;
+                    const gmailId = emailModal.email.gmail_id;
+                    const fileIcon = (mimeType) => {
+                      if (!mimeType) return '📎';
+                      if (mimeType.includes('pdf')) return '📄';
+                      if (mimeType.includes('image')) return '🖼';
+                      if (mimeType.includes('word') || mimeType.includes('document')) return '📝';
+                      if (mimeType.includes('sheet') || mimeType.includes('excel')) return '📊';
+                      if (mimeType.includes('presentation') || mimeType.includes('powerpoint')) return '📽';
+                      if (mimeType.includes('zip') || mimeType.includes('compressed')) return '🗜';
+                      return '📎';
+                    };
                     return (
                       <div style={{ marginBottom: '1rem' }}>
                         {images.length > 0 && (
-                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', marginBottom: links.length ? '0.75rem' : 0 }}>
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', marginBottom: (links.length || gmailAtts.length) ? '0.75rem' : 0 }}>
                             {images.map((img, i) => (
                               <a key={i} href={`https://drive.google.com/file/d/${img.id}/view`} target="_blank" rel="noreferrer">
                                 <img
@@ -1489,6 +1555,18 @@ export default function SchoolSyncPage() {
                                   onError={e => { e.currentTarget.style.display = 'none'; }}
                                 />
                               </a>
+                            ))}
+                          </div>
+                        )}
+                        {gmailAtts.length > 0 && (
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', marginBottom: links.length ? '0.5rem' : 0 }}>
+                            {gmailAtts.map((a, i) => (
+                              <button key={i}
+                                onClick={() => handleDownloadAttachment(gmailId, a)}
+                                style={{ fontSize: '0.8rem', padding: '0.2rem 0.6rem', background: 'rgba(255,255,255,0.06)', border: '1px solid var(--domus-border)', borderRadius: 4, color: 'var(--domus-primary)', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}>
+                                {fileIcon(a.mimeType)} {a.filename}
+                                {a.size > 0 && <span style={{ color: 'var(--domus-muted)', fontSize: '0.72rem' }}>({Math.round(a.size / 1024)} KB)</span>}
+                              </button>
                             ))}
                           </div>
                         )}

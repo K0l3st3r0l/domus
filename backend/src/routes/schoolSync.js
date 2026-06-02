@@ -26,7 +26,7 @@ function getOAuth2Client() {
 router.get('/status', authenticate, async (req, res) => {
   try {
     const result = await pool.query(
-      'SELECT child_email, child_name, last_sync, created_at FROM google_tokens WHERE user_id = $1 ORDER BY child_name',
+      'SELECT child_email, child_name, last_sync, created_at, token_valid FROM google_tokens WHERE user_id = $1 ORDER BY child_name',
       [req.user.id]
     );
     res.json({ connected: result.rows });
@@ -90,6 +90,7 @@ router.get('/callback', async (req, res) => {
          access_token  = EXCLUDED.access_token,
          refresh_token = COALESCE(EXCLUDED.refresh_token, google_tokens.refresh_token),
          token_expiry  = EXCLUDED.token_expiry,
+         token_valid   = TRUE,
          updated_at    = NOW()`,
       [
         userId,
@@ -245,34 +246,32 @@ router.get('/emails/:gmailId/body', authenticate, async (req, res) => {
     }
     const emailRow = emailResult.rows[0];
 
-    // Return cached body if available
-    if (emailRow.body || emailRow.html_body) {
-      return res.json({ body: emailRow.body || null, htmlBody: emailRow.html_body || null });
-    }
+    const existingAtts = Array.isArray(emailRow.attachments) ? emailRow.attachments : [];
+    const gmailAttsAlreadyFetched = emailRow.attachments !== null; // null = never fetched; [] = fetched, none found
 
-    // Classroom announcements are synthetic records, not Gmail messages.
-    // Fetch them from Classroom and cache the full text locally.
+    // Classroom announcements: body + attachments already stored, return from cache
     if (gmailId.startsWith('classroom:ann:')) {
+      if (emailRow.body) {
+        return res.json({ body: emailRow.body, htmlBody: null, attachments: existingAtts });
+      }
       const [, , courseId, announcementId] = gmailId.split(':');
       const auth = await getAuthClientForChild(req.user.id, emailRow.child_email);
       const classroom = google.classroom({ version: 'v1', auth });
-      const detail = await classroom.courses.announcements.get({
-        courseId,
-        id: announcementId,
-      });
-
+      const detail = await classroom.courses.announcements.get({ courseId, id: announcementId });
       const bodyText = detail.data?.text || emailRow.snippet || null;
       if (bodyText) {
-        pool.query(
-          'UPDATE school_emails SET body = $1 WHERE gmail_id = $2',
-          [bodyText, gmailId]
-        ).catch(err => console.error('Error caching classroom announcement body:', err.message));
+        pool.query('UPDATE school_emails SET body = $1 WHERE gmail_id = $2', [bodyText, gmailId])
+          .catch(err => console.error('Error caching classroom announcement body:', err.message));
       }
-
-      return res.json({ body: bodyText, htmlBody: null });
+      return res.json({ body: bodyText, htmlBody: null, attachments: existingAtts });
     }
 
-    // Fetch full message from Gmail API
+    // If body AND gmail attachments are already cached, return immediately
+    if ((emailRow.body || emailRow.html_body) && gmailAttsAlreadyFetched) {
+      return res.json({ body: emailRow.body || null, htmlBody: emailRow.html_body || null, attachments: existingAtts });
+    }
+
+    // Fetch full message from Gmail API (either body missing or attachments not yet extracted)
     const auth = await getAuthClientForChild(req.user.id, emailRow.child_email);
     const gmail = google.gmail({ version: 'v1', auth });
     const detail = await gmail.users.messages.get({
@@ -281,20 +280,63 @@ router.get('/emails/:gmailId/body', authenticate, async (req, res) => {
       format: 'full',
     });
 
-    const textBody = extractTextBody(detail.data.payload);
-    const htmlBody = extractHtmlBody(detail.data.payload);
+    const textBody = emailRow.body || extractTextBody(detail.data.payload);
+    const htmlBody = emailRow.html_body || extractHtmlBody(detail.data.payload);
+    const gmailAttachments = extractAttachments(detail.data.payload);
 
-    // Cache both plain text and HTML body for future reads
-    if (textBody || htmlBody) {
-      pool.query(
-        'UPDATE school_emails SET body = $1, html_body = $2, ai_processed = CASE WHEN ai_summary ILIKE $3 THEN false ELSE ai_processed END WHERE gmail_id = $4',
-        [textBody || null, htmlBody || null, '%incompleto%', gmailId]
-      ).catch(err => console.error('Error caching email body:', err.message));
-    }
+    // Merge Gmail attachments with existing Classroom attachments
+    const mergedAtts = existingAtts.filter(a => a.type !== 'gmail');
+    for (const a of gmailAttachments) mergedAtts.push({ ...a, type: 'gmail' });
 
-    res.json({ body: textBody, htmlBody });
+    pool.query(
+      'UPDATE school_emails SET body = $1, html_body = $2, attachments = $3, ai_processed = CASE WHEN ai_summary ILIKE $4 THEN false ELSE ai_processed END WHERE gmail_id = $5',
+      [textBody || null, htmlBody || null, JSON.stringify(mergedAtts), '%incompleto%', gmailId]
+    ).catch(err => console.error('Error caching email body:', err.message));
+
+    res.json({ body: textBody, htmlBody, attachments: mergedAtts });
   } catch (err) {
     console.error('Error fetching email body:', err);
+    if (isTokenRevokedError(err)) {
+      const emailResult2 = await pool.query('SELECT child_email FROM school_emails WHERE gmail_id = $1 AND user_id = $2', [req.params.gmailId, req.user.id]).catch(() => null);
+      if (emailResult2?.rows[0]?.child_email) {
+        await markTokenInvalid(req.user.id, emailResult2.rows[0].child_email);
+      }
+      return res.status(401).json({ error: 'token_revoked' });
+    }
+    res.status(500).json({ error: 'Error del servidor' });
+  }
+});
+
+// GET /api/school-sync/emails/:gmailId/attachments/:attachmentId
+router.get('/emails/:gmailId/attachments/:attachmentId', authenticate, async (req, res) => {
+  const { gmailId, attachmentId } = req.params;
+  try {
+    const emailResult = await pool.query(
+      'SELECT child_email, attachments FROM school_emails WHERE gmail_id = $1 AND user_id = $2',
+      [gmailId, req.user.id]
+    );
+    if (emailResult.rows.length === 0) return res.status(404).json({ error: 'Correo no encontrado' });
+
+    const emailRow = emailResult.rows[0];
+    const atts = Array.isArray(emailRow.attachments) ? emailRow.attachments : [];
+    const meta = atts.find(a => a.attachmentId === attachmentId);
+    if (!meta) return res.status(404).json({ error: 'Adjunto no encontrado' });
+
+    const auth = await getAuthClientForChild(req.user.id, emailRow.child_email);
+    const gmail = google.gmail({ version: 'v1', auth });
+    const attRes = await gmail.users.messages.attachments.get({
+      userId: 'me',
+      messageId: gmailId,
+      id: attachmentId,
+    });
+
+    const data = Buffer.from(attRes.data.data.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+    res.setHeader('Content-Type', meta.mimeType || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(meta.filename)}"`);
+    res.send(data);
+  } catch (err) {
+    console.error('Error descargando adjunto:', err);
+    if (isTokenRevokedError(err)) return res.status(401).json({ error: 'token_revoked' });
     res.status(500).json({ error: 'Error del servidor' });
   }
 });
@@ -564,7 +606,50 @@ function extractHtmlBody(payload) {
   return '';
 }
 
+function extractAttachments(payload, results = []) {
+  if (!payload) return results;
+  const { mimeType, filename, body, parts, headers } = payload;
+
+  // Gmail sometimes puts filename only in Content-Disposition header, not on the part directly
+  let effectiveFilename = filename;
+  if (!effectiveFilename && headers) {
+    const cd = headers.find(h => h.name.toLowerCase() === 'content-disposition')?.value || '';
+    const ctMatch = (headers.find(h => h.name.toLowerCase() === 'content-type')?.value || '').match(/name="?([^";\r\n]+)"?/i);
+    const cdMatch = cd.match(/filename\*?="?([^";\r\n]+)"?/i);
+    effectiveFilename = (cdMatch?.[1] || ctMatch?.[1] || '').trim();
+  }
+
+  if (body?.attachmentId) {
+    results.push({
+      attachmentId: body.attachmentId,
+      filename: effectiveFilename || `adjunto_${results.length + 1}`,
+      mimeType: mimeType || 'application/octet-stream',
+      size: body.size || 0,
+    });
+  }
+  if (parts) {
+    for (const part of parts) extractAttachments(part, results);
+  }
+  return results;
+}
+
 // ─── Funciones internas de sincronización ────────────────────────────────────
+
+function isTokenRevokedError(err) {
+  const msg = (err?.message || '').toLowerCase();
+  const desc = (err?.response?.data?.error_description || '').toLowerCase();
+  return msg.includes('token has been expired or revoked') ||
+    desc.includes('token has been expired or revoked') ||
+    msg.includes('invalid_grant') ||
+    (err?.response?.data?.error === 'invalid_grant');
+}
+
+async function markTokenInvalid(userId, childEmail) {
+  pool.query(
+    'UPDATE google_tokens SET token_valid = FALSE WHERE user_id = $1 AND child_email = $2',
+    [userId, childEmail]
+  ).catch(e => console.error('Error marcando token inválido:', e.message));
+}
 
 async function getAuthClientForChild(userId, childEmail) {
   const result = await pool.query(
@@ -583,9 +668,9 @@ async function getAuthClientForChild(userId, childEmail) {
     expiry_date: row.token_expiry ? new Date(row.token_expiry).getTime() : undefined,
   });
 
-  // Persist refreshed tokens automatically
+  // Persist refreshed tokens automatically and restore token_valid flag
   oauth2Client.on('tokens', async (tokens) => {
-    const sets = ['updated_at = NOW()'];
+    const sets = ['updated_at = NOW()', 'token_valid = TRUE'];
     const vals = [];
     if (tokens.access_token) {
       sets.push(`access_token = $${vals.length + 1}`);
@@ -1118,8 +1203,12 @@ async function syncChild(userId, childEmail, onStep = null, childName = null) {
     console.log(`✓ Sync completado para ${childEmail}`);
   } catch (err) {
     console.error(`Error sincronizando ${childEmail}:`, err.message);
-    // Count remaining steps as completed so progress doesn't stall
-    if (onStep) { step(`${label}: error — ${err.message}`); }
+    if (isTokenRevokedError(err)) {
+      await markTokenInvalid(userId, childEmail);
+      if (onStep) step(`${label}: token revocado — reconectar cuenta`);
+    } else {
+      if (onStep) step(`${label}: error — ${err.message}`);
+    }
   }
 }
 
