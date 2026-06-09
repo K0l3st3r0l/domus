@@ -4,7 +4,7 @@ const { google } = require('googleapis');
 const jwt = require('jsonwebtoken');
 const pool = require('../models/db');
 const { authenticate } = require('../middleware/auth');
-const { processEmail, getTokenStats } = require('../services/ollamaService');
+const { processEmail, getTokenStats, checkTokenHealth } = require('../services/aiService');
 
 const SCOPES = [
   'https://www.googleapis.com/auth/gmail.readonly',
@@ -504,8 +504,9 @@ router.delete('/disconnect', authenticate, async (req, res) => {
 // GET /api/school-sync/token-stats — AI token usage stats for tuning max_tokens
 router.get('/token-stats', authenticate, async (req, res) => {
   const stats = getTokenStats();
+  const health = checkTokenHealth();
   if (!stats) return res.json({ message: 'Sin datos aún. Procesa algunos correos primero.' });
-  res.json(stats);
+  res.json({ ...stats, health });
 });
 
 // ─── In-memory reprocess progress store ──────────────────────────────────────
@@ -788,7 +789,7 @@ async function processUnreadEmails(userId) {
         }
         const schedule = scheduleCache[email.child_email];
         // Use full body when cached; fall back to snippet
-        const content = email.body ? email.body.slice(0, 3000) : email.snippet;
+        const content = email.body ? email.body.slice(0, 1500) : email.snippet;
         const { extractedDate, type, summary, model } = await processEmail(email.subject, content, email.date, schedule);
 
         // Save AI processing results
@@ -864,7 +865,7 @@ async function reprocessEmailsByRange(userId, dateFrom, dateTo, progressStore) {
           scheduleCache[email.child_email] = await getScheduleForChild(userId, email.child_email);
         }
         const schedule = scheduleCache[email.child_email];
-        const content = email.body ? email.body.slice(0, 3000) : email.snippet;
+        const content = email.body ? email.body.slice(0, 1500) : email.snippet;
         const { extractedDate, type, summary, model } = await processEmail(email.subject, content, email.date, schedule);
 
         await pool.query(
@@ -1042,7 +1043,7 @@ async function syncClassroom(userId, childEmail, auth) {
 
 async function syncClassroomAnnouncements(userId, childEmail, auth) {
   const classroom = google.classroom({ version: 'v1', auth });
-  const { analyzeImage } = require('../services/ollamaService');
+  const { analyzeImage } = require('../services/aiService');
 
   let courses = [];
   try {

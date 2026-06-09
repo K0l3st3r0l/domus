@@ -2,6 +2,49 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../models/db');
 const { authenticate } = require('../middleware/auth');
+const { callAI } = require('../services/aiService');
+
+const MONTHS_ES = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
+
+function fmtCLP(n) {
+  return new Intl.NumberFormat('es-CL', { style: 'currency', currency: 'CLP', minimumFractionDigits: 0 }).format(n ?? 0);
+}
+
+// Extrae el último objeto JSON válido de un texto. Robusto ante modelos de
+// razonamiento que anteponen prosa o envuelven el JSON en bloques markdown.
+function extractJsonObject(text) {
+  if (!text) return null;
+  const t = text.trim();
+  try { return JSON.parse(t); } catch { /* sigue */ }
+
+  const fence = t.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+  if (fence) { try { return JSON.parse(fence[1].trim()); } catch { /* sigue */ } }
+
+  // Escaneo con conteo de llaves: recolecta cada {...} balanceado (ignora llaves dentro de strings)
+  const candidates = [];
+  for (let i = 0; i < t.length; i++) {
+    if (t[i] !== '{') continue;
+    let depth = 0, inStr = false, esc = false;
+    for (let j = i; j < t.length; j++) {
+      const ch = t[j];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (ch === '\\') esc = true;
+        else if (ch === '"') inStr = false;
+      } else if (ch === '"') inStr = true;
+      else if (ch === '{') depth++;
+      else if (ch === '}') { if (--depth === 0) { candidates.push(t.slice(i, j + 1)); break; } }
+    }
+  }
+  // Preferir el último candidato que parsee y tenga la forma esperada
+  for (let k = candidates.length - 1; k >= 0; k--) {
+    try { const o = JSON.parse(candidates[k]); if (o && typeof o === 'object' && 'resumen' in o) return o; } catch { /* sigue */ }
+  }
+  for (let k = candidates.length - 1; k >= 0; k--) {
+    try { return JSON.parse(candidates[k]); } catch { /* sigue */ }
+  }
+  return null;
+}
 
 function normalizeDescription(desc) {
   if (!desc || !desc.trim()) return null;
@@ -12,9 +55,10 @@ function normalizeDescription(desc) {
 router.get('/', authenticate, async (req, res) => {
   const { month, year, type, category } = req.query;
   try {
-    let query = `SELECT t.*, u.name as creator_name FROM finance_transactions t LEFT JOIN users u ON t.created_by = u.id WHERE t.created_by = $1`;
-    const params = [req.user.id];
-    let idx = 2;
+    // Finanzas familiares: se muestran las transacciones de todos los miembros (la sección está restringida por permisos)
+    let query = `SELECT t.*, u.name as creator_name FROM finance_transactions t LEFT JOIN users u ON t.created_by = u.id WHERE 1=1`;
+    const params = [];
+    let idx = 1;
     if (month && year) {
       query += ` AND EXTRACT(MONTH FROM t.date) = $${idx++} AND EXTRACT(YEAR FROM t.date) = $${idx++}`;
       params.push(month, year);
@@ -42,12 +86,11 @@ router.get('/summary', authenticate, async (req, res) => {
         SUM(amount) as total,
         COUNT(*) as count
        FROM finance_transactions
-       WHERE created_by = $1
-         AND EXTRACT(MONTH FROM date) = $2
-         AND EXTRACT(YEAR FROM date) = $3
+       WHERE EXTRACT(MONTH FROM date) = $1
+         AND EXTRACT(YEAR FROM date) = $2
        GROUP BY type, category
        ORDER BY type, total DESC`,
-      [req.user.id, m, y]
+      [m, y]
     );
     const breakdown = result.rows.map(r => ({ ...r, total: parseFloat(r.total) }));
     const income = breakdown.filter(r => r.type === 'income').reduce((s, r) => s + r.total, 0);
@@ -267,6 +310,158 @@ router.post('/categories-by-description', authenticate, async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Error obteniendo categorías' });
+  }
+});
+
+// Resumen consolidado: finanzas + suscripciones + créditos
+router.get('/dashboard-summary', authenticate, async (req, res) => {
+  const month = parseInt(req.query.month) || new Date().getMonth() + 1;
+  const year  = parseInt(req.query.year)  || new Date().getFullYear();
+  try {
+    const [finRes, subRes, credRes] = await Promise.all([
+      pool.query(
+        `SELECT type, category, SUM(amount) AS total
+         FROM finance_transactions
+         WHERE EXTRACT(MONTH FROM date) = $1
+           AND EXTRACT(YEAR  FROM date) = $2
+         GROUP BY type, category ORDER BY type, total DESC`,
+        [month, year]
+      ),
+      pool.query(
+        `SELECT name, amount, currency, billing_cycle, next_billing_date, category
+         FROM subscriptions WHERE status = 'active' ORDER BY amount DESC`
+      ),
+      pool.query(
+        `SELECT name, institution, type, current_balance, monthly_payment,
+                total_installments, paid_installments, interest_rate
+         FROM credits WHERE active = true ORDER BY current_balance DESC`
+      ),
+    ]);
+
+    const breakdown = finRes.rows.map(r => ({ ...r, total: parseFloat(r.total) }));
+    const income    = breakdown.filter(r => r.type === 'income').reduce((s, r) => s + r.total, 0);
+    const expenses  = breakdown.filter(r => r.type === 'expense').reduce((s, r) => s + r.total, 0);
+    const expenseByCategory = breakdown.filter(r => r.type === 'expense');
+
+    const monthlySubCost = subRes.rows.reduce((s, sub) => {
+      const a = parseFloat(sub.amount);
+      if (sub.billing_cycle === 'monthly') return s + a;
+      if (sub.billing_cycle === 'yearly')  return s + a / 12;
+      if (sub.billing_cycle === 'weekly')  return s + a * 4.33;
+      return s;
+    }, 0);
+
+    const monthlyCredits = credRes.rows.reduce((s, c) => s + parseFloat(c.monthly_payment || 0), 0);
+    const totalBalance   = credRes.rows.reduce((s, c) => s + parseFloat(c.current_balance || 0), 0);
+
+    res.json({
+      month, year,
+      finances: { income, expenses, balance: income - expenses, expenseByCategory },
+      subscriptions: {
+        active: subRes.rows.length,
+        monthlyEquivalent: Math.round(monthlySubCost),
+        items: subRes.rows,
+      },
+      credits: {
+        active: credRes.rows.length,
+        monthlyCommitment: Math.round(monthlyCredits),
+        totalBalance: Math.round(totalBalance),
+        items: credRes.rows,
+      },
+      realBalance: Math.round(income - expenses - monthlySubCost - monthlyCredits),
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error del servidor' });
+  }
+});
+
+// Análisis IA del mes financiero consolidado
+router.post('/ai-analyze', authenticate, async (req, res) => {
+  const month = parseInt(req.body.month) || new Date().getMonth() + 1;
+  const year  = parseInt(req.body.year)  || new Date().getFullYear();
+  try {
+    const [finRes, subRes, credRes] = await Promise.all([
+      pool.query(
+        `SELECT type, category, SUM(amount) AS total
+         FROM finance_transactions
+         WHERE EXTRACT(MONTH FROM date) = $1
+           AND EXTRACT(YEAR  FROM date) = $2
+         GROUP BY type, category ORDER BY type, total DESC`,
+        [month, year]
+      ),
+      pool.query(`SELECT name, amount, currency, billing_cycle, category FROM subscriptions WHERE status = 'active' ORDER BY amount DESC`),
+      pool.query(`SELECT name, institution, type, current_balance, monthly_payment, interest_rate FROM credits WHERE active = true ORDER BY current_balance DESC`),
+    ]);
+
+    const breakdown = finRes.rows.map(r => ({ ...r, total: parseFloat(r.total) }));
+    const income    = breakdown.filter(r => r.type === 'income').reduce((s, r) => s + r.total, 0);
+    const expenses  = breakdown.filter(r => r.type === 'expense').reduce((s, r) => s + r.total, 0);
+    const expCat    = breakdown.filter(r => r.type === 'expense');
+
+    const monthlySubCost = subRes.rows.reduce((s, sub) => {
+      const a = parseFloat(sub.amount);
+      if (sub.billing_cycle === 'monthly') return s + a;
+      if (sub.billing_cycle === 'yearly')  return s + a / 12;
+      if (sub.billing_cycle === 'weekly')  return s + a * 4.33;
+      return s;
+    }, 0);
+    const monthlyCredits = credRes.rows.reduce((s, c) => s + parseFloat(c.monthly_payment || 0), 0);
+    const realBalance    = income - expenses - monthlySubCost - monthlyCredits;
+
+    const expCatLines = expCat.length
+      ? expCat.map(c => `  - ${c.category}: ${fmtCLP(c.total)} (${income > 0 ? Math.round(c.total / income * 100) : 0}% del ingreso)`).join('\n')
+      : '  (sin gastos registrados)';
+
+    const subLines = subRes.rows.length
+      ? subRes.rows.map(s => `  - ${s.name}: ${s.currency} ${s.amount}/${s.billing_cycle} [${s.category}]`).join('\n')
+      : '  (sin suscripciones activas)';
+
+    const credLines = credRes.rows.length
+      ? credRes.rows.map(c => `  - ${c.name} (${c.institution}): cuota ${fmtCLP(c.monthly_payment)}/mes, saldo ${fmtCLP(c.current_balance)}${c.interest_rate ? `, tasa ${c.interest_rate}%` : ''}`).join('\n')
+      : '  (sin créditos activos)';
+
+    const prompt = `Eres un asesor financiero personal analizando las finanzas familiares chilenas de ${MONTHS_ES[month - 1]} ${year}.
+
+DATOS DEL MES:
+Ingresos: ${fmtCLP(income)}
+Gastos registrados: ${fmtCLP(expenses)}
+Suscripciones activas (${subRes.rows.length}): ${fmtCLP(Math.round(monthlySubCost))}/mes equivalente
+Compromisos de créditos (${credRes.rows.length} activos): ${fmtCLP(Math.round(monthlyCredits))}/mes
+Balance real disponible tras compromisos fijos: ${fmtCLP(Math.round(realBalance))}
+
+GASTOS POR CATEGORÍA:
+${expCatLines}
+
+SUSCRIPCIONES:
+${subLines}
+
+CRÉDITOS:
+${credLines}
+
+Evalúa internamente, SIN mostrar tu razonamiento: salud financiera (ratio gasto/ingreso, carga de deuda, diversificación de gastos), oportunidades de optimización concretas (suscripciones redundantes, categorías sobredimensionadas, créditos costosos) y riesgos (créditos con alta tasa, compromisos fijos vs ingreso disponible).
+
+IMPORTANTE: Tu respuesta debe ser UN ÚNICO objeto JSON válido y NADA MÁS. No escribas análisis, explicaciones, ni markdown antes o después. Formato exacto:
+{"resumen":"evaluación global en 1-2 oraciones directas","hallazgos":["hallazgo 1","hallazgo 2","hallazgo 3"],"recomendaciones":["acción concreta 1","acción concreta 2","acción concreta 3"],"alertas":["alerta 1"],"puntuacion":7}
+
+Si no hay alertas reales, usa alertas:[]. La puntuación es del 1 al 10 (10=excelente salud financiera).`;
+
+    const { content, finishReason } = await callAI([{ role: 'user', content: prompt }], { maxTokens: 4000 });
+
+    const parsed = extractJsonObject(content);
+
+    if (!parsed) {
+      console.error(`ai-analyze: respuesta no parseable. finishReason=${finishReason}, len=${content?.length}, head=${(content || '').slice(0, 200)}`);
+      const msg = finishReason === 'length'
+        ? 'El análisis se truncó por límite de tokens. Intenta de nuevo.'
+        : 'No se pudo parsear respuesta de IA';
+      return res.status(500).json({ error: msg });
+    }
+
+    res.json({ ...parsed, month, year, generatedAt: new Date().toISOString() });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error analizando finanzas' });
   }
 });
 

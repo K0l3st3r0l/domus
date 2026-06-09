@@ -64,21 +64,26 @@ function parseCMRWebStatement(text) {
 
     const lowerLine = trimmed.toLowerCase();
 
-    // Saltar fila de encabezado
-    if (lowerLine.startsWith('fecha de compras') || lowerLine.startsWith('descripción')) continue;
+    // Saltar fila de encabezado (formato viejo: "fecha de compras", formato actual: "fecha\t")
+    if (lowerLine.startsWith('fecha de compras') || lowerLine.startsWith('fecha\t') || lowerLine.startsWith('descripción')) continue;
 
     const parts = trimmed.split('\t').map(p => p.trim());
 
     // Necesitamos al menos: fecha, descripción, persona, monto
     if (parts.length < 4) continue;
 
-    const [dateStr, description, , amountStr] = parts;
+    const [dateStr, description, , totalAmountStr, cuotaInfo, cuotaAmountStr] = parts;
 
     // Validar formato de fecha DD/MM/YYYY
     if (!/^\d{2}\/\d{2}\/20\d{2}$/.test(dateStr)) continue;
 
-    // Parsear monto: " $50" o " $40.000" → 50 o 40000
-    const cleanAmount = amountStr.replace(/\$/g, '').replace(/\s/g, '').replace(/\./g, '');
+    // Detectar compras en cuotas: cuotaInfo tiene formato "01/06" (cuota actual / total)
+    const cuotaMatch = cuotaInfo && cuotaInfo.match(/^(\d+)\/(\d+)$/);
+    const totalCuotas = cuotaMatch ? parseInt(cuotaMatch[2], 10) : 1;
+
+    // Si hay cuotas > 1, usar el valor de la cuota mensual (total / cuotas ya calculado por CMR)
+    const rawAmount = totalCuotas > 1 && cuotaAmountStr ? cuotaAmountStr : totalAmountStr;
+    const cleanAmount = rawAmount.replace(/\$/g, '').replace(/\s/g, '').replace(/\./g, '');
     const amount = parseInt(cleanAmount, 10);
     if (!amount || amount <= 0) continue;
 
@@ -109,7 +114,13 @@ function parseCMRWebStatement(text) {
 
 function parseFalabellaStatement(text) {
   // Auto-detectar formato web (últimas transacciones desde el sitio CMR)
-  if (text.toLowerCase().includes('fecha de compras')) {
+  // El header puede ser "Fecha de compras" / "Fecha\t", o puede no estar (pegado directo desde la tabla)
+  // En ese caso, "Titular" o "Adicional" como columna es suficiente para identificar el formato tab
+  if (
+    text.toLowerCase().includes('fecha de compras') ||
+    /^fecha\t/im.test(text) ||
+    /\t(titular|adicional)\t/i.test(text)
+  ) {
     return parseCMRWebStatement(text);
   }
 
@@ -620,8 +631,8 @@ export default function FinancesPage() {
                       textAlign: 'center',
                       transition: 'all 0.2s',
                     }}
-                    onMouseEnter={e => { e.currentTarget.style.borderColor = '#4f46e5'; e.currentTarget.style.background = '#f0f4ff'; }}
-                    onMouseLeave={e => { e.currentTarget.style.borderColor = '#e2e8f0'; e.currentTarget.style.background = '#fff'; }}
+                    onMouseEnter={e => { e.currentTarget.style.borderColor = '#4f46e5'; e.currentTarget.style.background = '#f0f4ff'; e.currentTarget.style.color = '#1e293b'; }}
+                    onMouseLeave={e => { e.currentTarget.style.borderColor = '#e2e8f0'; e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = ''; }}
                   >
                     <div style={{ fontSize: '2rem', marginBottom: '0.5rem' }}>{bank.icon}</div>
                     <div style={{ fontWeight: 600, fontSize: '0.95rem' }}>{bank.label}</div>

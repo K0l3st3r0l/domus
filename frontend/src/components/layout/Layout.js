@@ -10,8 +10,6 @@ const NAV_ITEMS = [
   { to: '/menu', icon: '🍽️', label: 'Menú semanal' },
   { to: '/shopping', icon: '🛒', label: 'Lista de compra' },
   { to: '/finances', icon: '💰', label: 'Finanzas' },
-  { to: '/subscriptions', icon: '📋', label: 'Suscripciones' },
-  { to: '/credits', icon: '🏦', label: 'Créditos' },
   { to: '/school-sync', icon: '🎓', label: 'School Sync' },
   { to: '/school-schedule', icon: '📚', label: 'Horario' },
   { to: '/family', icon: '👨‍👩‍👧‍👦', label: 'Familia' },

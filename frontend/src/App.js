@@ -10,12 +10,10 @@ import DashboardPage from './pages/DashboardPage';
 import CalendarPage from './pages/CalendarPage';
 import MenuPage from './pages/MenuPage';
 import ShoppingPage from './pages/ShoppingPage';
-import FinancesPage from './pages/FinancesPage';
+import FinanceHub from './pages/FinanceHub';
 import FamilyPage from './pages/FamilyPage';
 import ProfilePage from './pages/ProfilePage';
 import SetupPage from './pages/SetupPage';
-import SubscriptionsPage from './pages/SubscriptionsPage';
-import CreditsPage from './pages/CreditsPage';
 import SchoolSyncPage from './pages/SchoolSyncPage';
 import SchoolSchedulePage from './pages/SchoolSchedulePage';
 
@@ -40,11 +38,11 @@ function AppRoutes() {
         <Route path="calendar" element={<CalendarPage />} />
         <Route path="menu" element={<MenuPage />} />
         <Route path="shopping" element={<ShoppingPage />} />
-        <Route path="finances" element={<FinancesPage />} />
+        <Route path="finances" element={<FinanceHub />} />
+        <Route path="subscriptions" element={<Navigate to="/finances?tab=suscripciones" replace />} />
+        <Route path="credits" element={<Navigate to="/finances?tab=creditos" replace />} />
         <Route path="family" element={<FamilyPage />} />
         <Route path="profile" element={<ProfilePage />} />
-        <Route path="subscriptions" element={<SubscriptionsPage />} />
-        <Route path="credits" element={<CreditsPage />} />
         <Route path="school-sync" element={<SchoolSyncPage />} />
         <Route path="school-schedule" element={<SchoolSchedulePage />} />
       </Route>
