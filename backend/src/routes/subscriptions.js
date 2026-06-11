@@ -3,7 +3,7 @@ const router = express.Router();
 const pool = require('../models/db');
 const { authenticate } = require('../middleware/auth');
 
-// Listar suscripciones
+// Listar suscripciones (con auto-detección de pagos por transacciones)
 router.get('/', authenticate, async (req, res) => {
   const { status } = req.query;
   try {
@@ -15,8 +15,52 @@ router.get('/', authenticate, async (req, res) => {
     }
     query += ' ORDER BY next_billing_date ASC';
     const result = await pool.query(query, params);
-    res.json(result.rows);
+    const subs = result.rows;
+
+    // Cargar transacciones de gastos de los últimos 40 días para auto-match
+    const txRes = await pool.query(
+      `SELECT id, amount, date, description FROM finance_transactions
+       WHERE type = 'expense' AND date >= CURRENT_DATE - 40 ORDER BY date DESC`
+    );
+
+    for (const sub of subs) {
+      if (sub.last_paid_at) continue; // ya registrado manualmente
+
+      // Construir keywords: match_keywords + palabras del nombre (≥3 chars)
+      const keywords = new Set();
+      if (sub.match_keywords) {
+        sub.match_keywords.split(',').map(k => k.trim().toLowerCase()).filter(k => k.length >= 3).forEach(k => keywords.add(k));
+      }
+      sub.name.split(/\s+/).map(w => w.toLowerCase()).filter(w => w.length >= 3).forEach(w => keywords.add(w));
+
+      // Calcular inicio del ciclo actual
+      const nextDate = new Date(sub.next_billing_date);
+      const cycleStart = new Date(nextDate);
+      if (sub.billing_cycle === 'monthly') cycleStart.setMonth(cycleStart.getMonth() - 1);
+      else if (sub.billing_cycle === 'yearly') cycleStart.setFullYear(cycleStart.getFullYear() - 1);
+      else if (sub.billing_cycle === 'weekly') cycleStart.setDate(cycleStart.getDate() - 7);
+
+      // Buscar transacción que coincida en el período y descripción
+      const match = txRes.rows.find(tx => {
+        const txDate = new Date(tx.date);
+        if (txDate < cycleStart) return false;
+        const desc = (tx.description || '').toLowerCase();
+        return [...keywords].some(k => desc.includes(k));
+      });
+
+      if (match) {
+        sub.auto_matched_tx = {
+          id: match.id,
+          amount: parseFloat(match.amount),
+          date: match.date,
+          description: match.description,
+        };
+      }
+    }
+
+    res.json(subs);
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: 'Error del servidor' });
   }
 });
@@ -71,14 +115,14 @@ router.get('/summary', authenticate, async (req, res) => {
 
 // Crear suscripción
 router.post('/', authenticate, async (req, res) => {
-  const { name, category, amount, currency, billing_cycle, next_billing_date, status, alert_days, url, notes } = req.body;
+  const { name, category, amount, currency, billing_cycle, next_billing_date, status, alert_days, url, notes, match_keywords } = req.body;
   if (!name || !amount || !next_billing_date) {
     return res.status(400).json({ error: 'Nombre, importe y fecha de renovación requeridos' });
   }
   try {
     const result = await pool.query(
-      `INSERT INTO subscriptions (name, category, amount, currency, billing_cycle, next_billing_date, status, alert_days, url, notes, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
+      `INSERT INTO subscriptions (name, category, amount, currency, billing_cycle, next_billing_date, status, alert_days, url, notes, match_keywords, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
       [
         name,
         category || 'Entretenimiento',
@@ -90,6 +134,7 @@ router.post('/', authenticate, async (req, res) => {
         alert_days ?? 3,
         url || null,
         notes || null,
+        match_keywords || null,
         req.user.id,
       ]
     );
@@ -101,18 +146,59 @@ router.post('/', authenticate, async (req, res) => {
 
 // Actualizar suscripción
 router.put('/:id', authenticate, async (req, res) => {
-  const { name, category, amount, currency, billing_cycle, next_billing_date, status, alert_days, url, notes } = req.body;
+  const { name, category, amount, currency, billing_cycle, next_billing_date, status, alert_days, url, notes, match_keywords } = req.body;
   try {
     const result = await pool.query(
       `UPDATE subscriptions
        SET name=$1, category=$2, amount=$3, currency=$4, billing_cycle=$5,
-           next_billing_date=$6, status=$7, alert_days=$8, url=$9, notes=$10, updated_at=NOW()
-       WHERE id=$11 RETURNING *`,
-      [name, category, amount, currency, billing_cycle, next_billing_date, status, alert_days, url || null, notes || null, req.params.id]
+           next_billing_date=$6, status=$7, alert_days=$8, url=$9, notes=$10, match_keywords=$11, updated_at=NOW()
+       WHERE id=$12 RETURNING *`,
+      [name, category, amount, currency, billing_cycle, next_billing_date, status, alert_days, url || null, notes || null, match_keywords || null, req.params.id]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Suscripción no encontrada' });
     res.json(result.rows[0]);
   } catch (err) {
+    res.status(500).json({ error: 'Error del servidor' });
+  }
+});
+
+// Registrar pago de una suscripción
+router.post('/:id/pay', authenticate, async (req, res) => {
+  const { amount_clp, paid_date } = req.body;
+  if (!amount_clp) {
+    return res.status(400).json({ error: 'Monto en CLP requerido' });
+  }
+  try {
+    const sub = await pool.query('SELECT * FROM subscriptions WHERE id = $1', [req.params.id]);
+    if (sub.rows.length === 0) return res.status(404).json({ error: 'Suscripción no encontrada' });
+
+    const s = sub.rows[0];
+    const paidAt = paid_date || new Date().toISOString().split('T')[0];
+
+    // Avanzar next_billing_date al siguiente ciclo
+    let nextDate;
+    if (s.billing_cycle === 'monthly') {
+      nextDate = new Date(s.next_billing_date);
+      nextDate.setMonth(nextDate.getMonth() + 1);
+    } else if (s.billing_cycle === 'yearly') {
+      nextDate = new Date(s.next_billing_date);
+      nextDate.setFullYear(nextDate.getFullYear() + 1);
+    } else if (s.billing_cycle === 'weekly') {
+      nextDate = new Date(s.next_billing_date);
+      nextDate.setDate(nextDate.getDate() + 7);
+    } else {
+      nextDate = new Date(s.next_billing_date);
+    }
+
+    const result = await pool.query(
+      `UPDATE subscriptions
+       SET last_paid_at = $1, last_paid_amount = $2, next_billing_date = $3, updated_at = NOW()
+       WHERE id = $4 RETURNING *`,
+      [paidAt, amount_clp, nextDate.toISOString().split('T')[0], req.params.id]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
     res.status(500).json({ error: 'Error del servidor' });
   }
 });

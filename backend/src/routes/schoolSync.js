@@ -51,7 +51,7 @@ router.get('/auth-url', authenticate, async (req, res) => {
   const oauth2Client = getOAuth2Client();
   const url = oauth2Client.generateAuthUrl({
     access_type: 'offline',
-    prompt: 'login',
+    prompt: 'consent',
     scope: SCOPES,
     state,
   });
@@ -97,7 +97,7 @@ router.get('/callback', async (req, res) => {
         childEmail,
         childName,
         tokens.access_token,
-        tokens.refresh_token || null,
+        tokens.refresh_token,
         tokens.expiry_date ? new Date(tokens.expiry_date) : null,
       ]
     );
@@ -401,6 +401,11 @@ router.post('/sync-email-to-calendar', authenticate, async (req, res) => {
     }
 
     const email = emailResult.rows[0];
+
+    if (email.calendar_event_id) {
+      return res.status(400).json({ error: 'Este correo ya fue agregado al calendario' });
+    }
+
     const extractedDate = email.extracted_date || email.date || new Date();
     const schedule = await getScheduleForChild(req.user.id, email.child_email);
     const timing = inferCalendarTimingFromSchedule({
@@ -416,8 +421,8 @@ router.post('/sync-email-to-calendar', authenticate, async (req, res) => {
     );
 
     await pool.query(
-      'UPDATE school_emails SET synced_to_calendar = true WHERE id = $1',
-      [emailId]
+      'UPDATE school_emails SET synced_to_calendar = true, calendar_event_id = $1 WHERE id = $2',
+      [eventResult.rows[0].id, emailId]
     );
 
     res.json({ success: true, eventId: eventResult.rows[0].id });
@@ -577,6 +582,25 @@ router.post('/reprocess', authenticate, (req, res) => {
 function decodeBase64Url(data) {
   const b64 = data.replace(/-/g, '+').replace(/_/g, '/');
   return Buffer.from(b64, 'base64').toString('utf8');
+}
+
+async function fetchBodyIfMissing(userId, email) {
+  if (email.body) return email.body.slice(0, 1500);
+  if (!email.gmail_id || email.gmail_id.startsWith('classroom:')) return email.snippet;
+  try {
+    const auth = await getAuthClientForChild(userId, email.child_email);
+    const gmail = google.gmail({ version: 'v1', auth });
+    const detail = await gmail.users.messages.get({ userId: 'me', id: email.gmail_id, format: 'full' });
+    const textBody = extractTextBody(detail.data.payload);
+    if (textBody) {
+      pool.query('UPDATE school_emails SET body = $1 WHERE id = $2', [textBody, email.id])
+        .catch(err => console.error('Error caching email body:', err.message));
+      return textBody.slice(0, 1500);
+    }
+  } catch (err) {
+    console.error(`Error fetching body for email ${email.id}:`, err.message);
+  }
+  return email.snippet;
 }
 
 function extractTextBody(payload) {
@@ -772,7 +796,7 @@ async function processUnreadEmails(userId) {
 
   try {
     const emails = await pool.query(
-      `SELECT id, child_email, subject, snippet, body, date FROM school_emails
+      `SELECT id, gmail_id, child_email, subject, snippet, body, date FROM school_emails
        WHERE user_id = $1
          AND is_read = false
          AND ai_processed = false
@@ -788,8 +812,7 @@ async function processUnreadEmails(userId) {
           scheduleCache[email.child_email] = await getScheduleForChild(userId, email.child_email);
         }
         const schedule = scheduleCache[email.child_email];
-        // Use full body when cached; fall back to snippet
-        const content = email.body ? email.body.slice(0, 1500) : email.snippet;
+        const content = await fetchBodyIfMissing(userId, email);
         const { extractedDate, type, summary, model } = await processEmail(email.subject, content, email.date, schedule);
 
         // Save AI processing results
@@ -804,18 +827,41 @@ async function processUnreadEmails(userId) {
         // Auto-create calendar event if date was extracted and is in the future
         if (extractedDate && extractedDate >= new Date()) {
           try {
-            const timing = inferCalendarTimingFromSchedule({
-              subject: email.subject,
-              summary,
-              extractedDate,
-              schedule,
-            });
-            await pool.query(
-              `INSERT INTO calendar_events (title, description, start_time, end_time, all_day, color, created_by)
-               VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-              [`🗓️ ${email.subject}`, summary || 'Evento detectado por IA', timing.startTime, timing.endTime, timing.allDay, '#f59e0b', userId]
+            const existingForEmail = await pool.query(
+              `SELECT calendar_event_id FROM school_emails WHERE id = $1 AND calendar_event_id IS NOT NULL`,
+              [email.id]
             );
-            eventsCreated++;
+            let alreadyExists = existingForEmail.rows.length > 0;
+
+            if (!alreadyExists) {
+              const dup = await pool.query(
+                `SELECT id FROM calendar_events
+                 WHERE created_by = $1
+                   AND title = $2
+                   AND start_time::date = $3::date`,
+                [userId, `🗓️ ${email.subject}`, extractedDate]
+              );
+              alreadyExists = dup.rows.length > 0;
+            }
+
+            if (!alreadyExists) {
+              const timing = inferCalendarTimingFromSchedule({
+                subject: email.subject,
+                summary,
+                extractedDate,
+                schedule,
+              });
+              const insertResult = await pool.query(
+                `INSERT INTO calendar_events (title, description, start_time, end_time, all_day, color, created_by)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+                [`🗓️ ${email.subject}`, summary || 'Evento detectado por IA', timing.startTime, timing.endTime, timing.allDay, '#f59e0b', userId]
+              );
+              await pool.query(
+                `UPDATE school_emails SET calendar_event_id = $1 WHERE id = $2`,
+                [insertResult.rows[0].id, email.id]
+              );
+              eventsCreated++;
+            }
           } catch (err) {
             console.error('Error creating calendar event:', err.message);
           }
@@ -848,7 +894,7 @@ async function reprocessEmailsByRange(userId, dateFrom, dateTo, progressStore) {
     toDate.setHours(23, 59, 59, 999);
 
     const emails = await pool.query(
-      `SELECT id, child_email, subject, snippet, body, date FROM school_emails
+      `SELECT id, gmail_id, child_email, subject, snippet, body, date FROM school_emails
        WHERE user_id = $1
          AND date >= $2
          AND date <= $3
@@ -865,7 +911,7 @@ async function reprocessEmailsByRange(userId, dateFrom, dateTo, progressStore) {
           scheduleCache[email.child_email] = await getScheduleForChild(userId, email.child_email);
         }
         const schedule = scheduleCache[email.child_email];
-        const content = email.body ? email.body.slice(0, 1500) : email.snippet;
+        const content = await fetchBodyIfMissing(userId, email);
         const { extractedDate, type, summary, model } = await processEmail(email.subject, content, email.date, schedule);
 
         await pool.query(
@@ -879,25 +925,38 @@ async function reprocessEmailsByRange(userId, dateFrom, dateTo, progressStore) {
 
         if (extractedDate && extractedDate >= new Date()) {
           try {
-            const existing = await pool.query(
-              `SELECT id FROM calendar_events
-               WHERE created_by = $1
-                 AND title LIKE $2
-                 AND start_time::date = $3::date`,
-              [userId, `%${email.subject}%`, extractedDate]
+            const existingForEmail = await pool.query(
+              `SELECT calendar_event_id FROM school_emails WHERE id = $1 AND calendar_event_id IS NOT NULL`,
+              [email.id]
             );
+            let alreadyExists = existingForEmail.rows.length > 0;
 
-            if (existing.rows.length === 0) {
+            if (!alreadyExists) {
+              const dup = await pool.query(
+                `SELECT id FROM calendar_events
+                 WHERE created_by = $1
+                   AND title = $2
+                   AND start_time::date = $3::date`,
+                [userId, `🗓️ ${email.subject}`, extractedDate]
+              );
+              alreadyExists = dup.rows.length > 0;
+            }
+
+            if (!alreadyExists) {
               const timing = inferCalendarTimingFromSchedule({
                 subject: email.subject,
                 summary,
                 extractedDate,
                 schedule,
               });
-              await pool.query(
+              const insertResult = await pool.query(
                 `INSERT INTO calendar_events (title, description, start_time, end_time, all_day, color, created_by)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+                 VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
                 [`🗓️ ${email.subject}`, summary || 'Evento detectado por IA', timing.startTime, timing.endTime, timing.allDay, '#f59e0b', userId]
+              );
+              await pool.query(
+                `UPDATE school_emails SET calendar_event_id = $1 WHERE id = $2`,
+                [insertResult.rows[0].id, email.id]
               );
               eventsCreated++;
               setProgress({ eventsCreated });

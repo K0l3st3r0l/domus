@@ -1,0 +1,8 @@
+* { box-sizing: border-box; }
+
+body {
+  font-family: 'Inter', sans-serif;
+  background-color: var(--domus-bg);
+  color: var(--domus-text);
+  margin: 0;
+}

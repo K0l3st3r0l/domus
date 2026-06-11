@@ -7,11 +7,14 @@ import { useAuth } from '../context/AuthContext';
 const AVATARS = ['👤','👩','👨','👧','👦','👴','👵','🧑','👶','🐶','🐱','🦊','🦁','🐻','🌟','👑','🎭','🦸'];
 
 export default function FamilyPage() {
-  const { isAdmin } = useAuth();
+  const { isAdmin, user } = useAuth();
   const [members, setMembers] = useState([]);
   const [showInvite, setShowInvite] = useState(false);
   const [invite, setInvite] = useState({ email: '', role: 'member' });
   const [inviteLink, setInviteLink] = useState('');
+  const [showReset, setShowReset] = useState(false);
+  const [resetTarget, setResetTarget] = useState(null);
+  const [newPassword, setNewPassword] = useState('');
 
   const fetchMembers = async () => {
     try {
@@ -39,6 +42,28 @@ export default function FamilyPage() {
     } catch { toast.error('Error'); }
   };
 
+  const openResetPassword = (member) => {
+    setResetTarget(member);
+    setNewPassword('');
+    setShowReset(true);
+  };
+
+  const handleResetPassword = async () => {
+    if (!newPassword || newPassword.length < 8) {
+      toast.warn('La contraseña debe tener al menos 8 caracteres');
+      return;
+    }
+    try {
+      await apiClient.post(`/users/${resetTarget.id}/reset-password`, { newPassword });
+      toast.success(`Contraseña de ${resetTarget.name} actualizada`);
+      setShowReset(false);
+      setNewPassword('');
+      setResetTarget(null);
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Error al cambiar la contraseña');
+    }
+  };
+
   const copyLink = () => {
     navigator.clipboard.writeText(inviteLink);
     toast.success('Enlace copiado al portapapeles');
@@ -64,7 +89,12 @@ export default function FamilyPage() {
                 {member.role === 'admin' ? '⚙️ Admin' : '👤 Miembro'}
               </span>
               {isAdmin && (
-                <div style={{ marginTop: '1rem' }}>
+                <div style={{ marginTop: '1rem', display: 'flex', gap: '0.5rem', justifyContent: 'center', flexWrap: 'wrap' }}>
+                  {member.id !== user?.id && (
+                    <Button size="sm" variant="outline-primary" onClick={() => openResetPassword(member)}>
+                      🔑 Contraseña
+                    </Button>
+                  )}
                   <Button size="sm" variant={member.active ? 'outline-danger' : 'outline-success'} onClick={() => toggleMember(member)}>
                     {member.active ? 'Desactivar' : 'Activar'}
                   </Button>
@@ -109,6 +139,37 @@ export default function FamilyPage() {
             <Button className="btn-domus" onClick={handleInvite}>Generar invitación</Button>
           </Modal.Footer>
         )}
+      </Modal>
+
+      <Modal show={showReset} onHide={() => setShowReset(false)} centered>
+        <Modal.Header closeButton>
+          <Modal.Title>🔑 Cambiar contraseña</Modal.Title>
+        </Modal.Header>
+        <Modal.Body>
+          {resetTarget && (
+            <>
+              <p style={{ fontSize: '0.9rem', color: '#64748b', marginBottom: '1rem' }}>
+                Estás cambiando la contraseña de <strong>{resetTarget.name}</strong> ({resetTarget.email}).
+                Comparte la nueva contraseña con el miembro por un canal seguro.
+              </p>
+              <Form.Group className="mb-3">
+                <Form.Label>Nueva contraseña</Form.Label>
+                <Form.Control
+                  type="password"
+                  value={newPassword}
+                  onChange={e => setNewPassword(e.target.value)}
+                  placeholder="Mínimo 8 caracteres"
+                  autoFocus
+                  onKeyDown={e => { if (e.key === 'Enter') handleResetPassword(); }}
+                />
+              </Form.Group>
+            </>
+          )}
+        </Modal.Body>
+        <Modal.Footer>
+          <Button variant="secondary" onClick={() => setShowReset(false)}>Cancelar</Button>
+          <Button className="btn-domus" onClick={handleResetPassword}>Guardar contraseña</Button>
+        </Modal.Footer>
       </Modal>
     </div>
   );

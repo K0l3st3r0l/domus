@@ -25,6 +25,10 @@ export default function MenuPage() {
   const [showModal, setShowModal] = useState(false);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState({ dish_name: '', notes: '' });
+  const [mobileDayIdx, setMobileDayIdx] = useState(() => {
+    const d = moment().isoWeekday() - 1; // 0=Lun … 6=Dom
+    return Math.max(0, Math.min(6, d));
+  });
 
   const weekStart = getWeekStart(weekOffset);
   const weekStartStr = weekStart.format('YYYY-MM-DD');
@@ -93,15 +97,16 @@ export default function MenuPage() {
             Semana del {weekStart.format('D [de] MMMM')} al {weekStart.clone().add(6, 'days').format('D [de] MMMM YYYY')}
           </p>
         </div>
-        <div style={{ display: 'flex', gap: '0.5rem' }}>
+        <div className="menu-nav-btns">
           <Button variant="outline-secondary" size="sm" onClick={() => setWeekOffset(o => o - 1)}>‹ Anterior</Button>
           <Button variant="outline-secondary" size="sm" onClick={() => setWeekOffset(0)}>Hoy</Button>
           <Button variant="outline-secondary" size="sm" onClick={() => setWeekOffset(o => o + 1)}>Siguiente ›</Button>
-          <Button className="btn-domus" size="sm" onClick={handleGenerateShopping}>🛒 Generar lista</Button>
+          <Button className="btn-domus" size="sm" onClick={handleGenerateShopping}>🛒 Lista</Button>
         </div>
       </div>
 
-      <div className="domus-card" style={{ overflowX: 'auto' }}>
+      {/* ── Vista escritorio: tabla ── */}
+      <div className="domus-card menu-desktop-view" style={{ overflowX: 'auto' }}>
         <table style={{ width: '100%', borderCollapse: 'collapse' }}>
           <thead>
             <tr>
@@ -147,6 +152,46 @@ export default function MenuPage() {
             ))}
           </tbody>
         </table>
+      </div>
+
+      {/* ── Vista mobile: pestañas por día + comidas en lista ── */}
+      <div className="menu-mobile-view">
+        <div className="menu-day-tabs">
+          {DAYS.map((day, i) => {
+            const date = weekStart.clone().add(i, 'days');
+            const isToday = date.isSame(moment(), 'day');
+            return (
+              <button
+                key={i}
+                onClick={() => setMobileDayIdx(i)}
+                className={`menu-day-tab${mobileDayIdx === i ? ' active' : ''}${isToday ? ' today' : ''}`}
+              >
+                <div className="menu-day-tab-name">{day.slice(0, 3)}</div>
+                <div className="menu-day-tab-date">{date.format('D')}</div>
+              </button>
+            );
+          })}
+        </div>
+
+        <p className="menu-mobile-day-title">
+          {DAYS[mobileDayIdx]} · {weekStart.clone().add(mobileDayIdx, 'days').format('D [de] MMMM')}
+        </p>
+
+        <div className="menu-mobile-meals">
+          {MEALS.map(meal => {
+            const item = menuData[`${mobileDayIdx}-${meal.key}`];
+            return (
+              <div key={meal.key} className="menu-mobile-meal-row" onClick={() => openEdit(mobileDayIdx, meal)}>
+                <div className="menu-mobile-meal-label">{meal.label}</div>
+                {item ? (
+                  <div className="menu-mobile-meal-filled">{item.dish_name}</div>
+                ) : (
+                  <div className="menu-mobile-meal-empty">+ Añadir</div>
+                )}
+              </div>
+            );
+          })}
+        </div>
       </div>
 
       <Modal show={showModal} onHide={() => setShowModal(false)} centered>

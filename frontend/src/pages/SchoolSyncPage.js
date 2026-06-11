@@ -311,6 +311,7 @@ export default function SchoolSyncPage() {
   const [typeFilter, setTypeFilter] = useState('all');
   const [courseFilter, setCourseFilter] = useState('all');
   const [mainView, setMainView] = useState('default'); // 'default' | 'by-subject'
+  const [mobileTab, setMobileTab] = useState('tasks'); // 'tasks' | 'emails'
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
@@ -809,7 +810,7 @@ export default function SchoolSyncPage() {
   const selectedArray = [...selectedIds];
 
   return (
-    <div style={{ padding: '1.5rem' }}>
+    <div className="school-sync-page">
       {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem', flexWrap: 'wrap', gap: '0.75rem' }}>
         <div>
@@ -1153,10 +1154,10 @@ export default function SchoolSyncPage() {
                   {cEmails.length > 0 && <Badge bg="secondary">{cEmails.length} mensaje(s)</Badge>}
                 </div>
               </div>
-              <div style={{ display: 'grid', gridTemplateColumns: cEmails.length > 0 ? '1fr 1fr' : '1fr', gap: 0 }}>
+              <div className={`school-sync-subject-grid${cEmails.length > 0 ? ' two-col' : ''}`}>
                 {/* Assignments */}
                 {cAssignments.length > 0 && (
-                  <div style={{ padding: '0.75rem', borderRight: cEmails.length > 0 ? '1px solid var(--domus-border)' : 'none' }}>
+                  <div className="school-sync-subject-assigns" style={{ padding: '0.75rem' }}>
                     {cAssignments.map(task => (
                       <div key={task.id} style={{
                         padding: '0.5rem 0.75rem',
@@ -1217,11 +1218,35 @@ export default function SchoolSyncPage() {
         </div>
       )}
 
+      {/* Mobile section tabs — ocultos en desktop via CSS */}
+      {mainView === 'default' && (
+        <div className="school-sync-mobile-tabs">
+          <button
+            className={`school-sync-mobile-tab${mobileTab === 'tasks' ? ' active' : ''}`}
+            onClick={() => setMobileTab('tasks')}
+          >
+            📚 Tareas
+            {pendingAssignments.length > 0 && (
+              <span className="school-sync-tab-badge">{pendingAssignments.length}</span>
+            )}
+          </button>
+          <button
+            className={`school-sync-mobile-tab${mobileTab === 'emails' ? ' active' : ''}`}
+            onClick={() => setMobileTab('emails')}
+          >
+            📧 Mensajes
+            {filteredEmails.length > 0 && (
+              <span className="school-sync-tab-badge">{filteredEmails.length}</span>
+            )}
+          </button>
+        </div>
+      )}
+
       {/* Two-column content */}
-      {mainView === 'default' && <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
+      {mainView === 'default' && <div className="school-sync-main-grid" data-mobile-tab={mobileTab}>
 
         {/* ── Emails column ── */}
-        <div>
+        <div className="school-sync-emails-col">
           <h5 style={{ marginBottom: '0.5rem' }}>📧 Mensajes
             {typeFilter !== 'all' && <Badge bg="info" style={{ marginLeft: 6, fontSize: '0.7rem' }}>{filteredEmails.length}</Badge>}
           </h5>
@@ -1305,7 +1330,7 @@ export default function SchoolSyncPage() {
         </div>
 
         {/* ── Assignments column ── */}
-        <div>
+        <div className="school-sync-tasks-col">
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', gap: '0.5rem', flexWrap: 'wrap' }}>
             <h5 style={{ margin: 0 }}>📚 Tareas y pruebas{showOverdue && ' (Vencidas)'}</h5>
             {showOverdue && (

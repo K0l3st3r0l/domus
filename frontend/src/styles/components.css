@@ -1,0 +1,113 @@
+/* ── Cards ── */
+.domus-card {
+  background: var(--domus-card-bg);
+  border: 1px solid var(--domus-border);
+  border-radius: 12px;
+  padding: 1.5rem;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
+
+.domus-stat-card {
+  background: var(--domus-card-bg);
+  border-radius: 12px;
+  padding: 1.25rem 1.5rem;
+  border: 1px solid var(--domus-border);
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.domus-stat-icon {
+  width: 48px;
+  height: 48px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.4rem;
+  flex-shrink: 0;
+}
+
+.domus-stat-value {
+  font-size: 1.5rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.domus-stat-label {
+  font-size: 0.8rem;
+  color: var(--domus-muted);
+  margin-top: 0.2rem;
+}
+
+/* ── Login / Register ── */
+.domus-login-page {
+  min-height: 100vh;
+  background: linear-gradient(135deg, #1e1b4b 0%, #312e81 50%, #4f46e5 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.domus-login-card {
+  background: var(--domus-card-bg);
+  border-radius: 20px;
+  padding: 2.5rem;
+  width: 100%;
+  max-width: 420px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+  color: var(--domus-text);
+}
+
+.domus-login-logo {
+  text-align: center;
+  font-size: 2rem;
+  font-weight: 800;
+  color: var(--domus-primary);
+  margin-bottom: 0.25rem;
+}
+
+.domus-login-logo span { color: var(--domus-secondary); }
+
+/* ── Buttons ── */
+.btn-domus {
+  background: var(--domus-primary);
+  border-color: var(--domus-primary);
+  color: #fff;
+  font-weight: 500;
+  border-radius: 8px;
+  padding: 0.5rem 1.25rem;
+}
+
+.btn-domus:hover {
+  background: var(--domus-primary-dark);
+  border-color: var(--domus-primary-dark);
+  color: #fff;
+}
+
+/* Bootstrap btn-primary → Domus primary */
+.btn-primary {
+  background-color: var(--domus-primary);
+  border-color: var(--domus-primary);
+}
+.btn-primary:hover,
+.btn-primary:focus-visible {
+  background-color: var(--domus-primary-dark);
+  border-color: var(--domus-primary-dark);
+}
+.btn-primary:active,
+.btn-primary:not(:disabled):not(.disabled):active {
+  background-color: var(--domus-primary-dark);
+  border-color: var(--domus-primary-dark);
+}
+.btn-check:checked + .btn-primary,
+.btn-check:active + .btn-primary {
+  background-color: var(--domus-primary-dark);
+  border-color: var(--domus-primary-dark);
+}
+
+/* ── Finance colors ── */
+.text-income { color: #10b981; }
+.text-expense { color: #ef4444; }
+.bg-income { background: var(--domus-income-bg); }
+.bg-expense { background: var(--domus-expense-bg); }

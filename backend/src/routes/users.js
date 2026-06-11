@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const pool = require('../models/db');
+const bcrypt = require('bcryptjs');
 const { authenticate, requireAdmin } = require('../middleware/auth');
 
 // Listar miembros de la familia
@@ -38,6 +39,28 @@ router.patch('/:id/toggle', authenticate, requireAdmin, async (req, res) => {
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Usuario no encontrado' });
     res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: 'Error del servidor' });
+  }
+});
+
+// Cambiar contraseña de un miembro (solo admin)
+router.post('/:id/reset-password', authenticate, requireAdmin, async (req, res) => {
+  const { newPassword } = req.body;
+  if (!newPassword || newPassword.length < 8) {
+    return res.status(400).json({ error: 'La contraseña debe tener al menos 8 caracteres' });
+  }
+  if (String(req.params.id) === String(req.user.id)) {
+    return res.status(400).json({ error: 'Usa la opción de cambio de contraseña de tu propio perfil' });
+  }
+  try {
+    const hash = await bcrypt.hash(newPassword, 10);
+    const result = await pool.query(
+      'UPDATE users SET password_hash = $1 WHERE id = $2 RETURNING id, name, email',
+      [hash, req.params.id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Usuario no encontrado' });
+    res.json({ success: true, user: result.rows[0] });
   } catch (err) {
     res.status(500).json({ error: 'Error del servidor' });
   }

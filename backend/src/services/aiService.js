@@ -5,7 +5,7 @@ const AI_API_URL = process.env.AI_API_URL || 'https://opencode.ai/zen/go';
 const AI_API_KEY = process.env.AI_API_KEY;
 const AI_MODEL = process.env.AI_MODEL || 'deepseek-v4-pro';
 const AI_VISION_MODEL = process.env.AI_VISION_MODEL;
-const MAX_TOKENS = 5000;
+const MAX_TOKENS = 8000;
 
 const TOKEN_LOG_PATH = path.join('/app/logs', 'ai_tokens.jsonl');
 

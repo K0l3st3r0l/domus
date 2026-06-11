@@ -1,0 +1,93 @@
+/* ── Bootstrap component overrides for dark theme ── */
+
+[data-theme="dark"] .form-control,
+[data-theme="dark"] .form-select {
+  background-color: var(--domus-input-bg);
+  border-color: var(--domus-border);
+  color: var(--domus-text);
+}
+
+[data-theme="dark"] .form-control:focus,
+[data-theme="dark"] .form-select:focus {
+  background-color: var(--domus-input-bg);
+  border-color: var(--domus-primary);
+  color: var(--domus-text);
+  box-shadow: 0 0 0 0.25rem rgba(79, 70, 229, 0.25);
+}
+
+[data-theme="dark"] .form-control::placeholder { color: var(--domus-muted); }
+
+[data-theme="dark"] .modal-content {
+  background-color: var(--domus-card-bg);
+  border-color: var(--domus-border);
+  color: var(--domus-text);
+}
+
+[data-theme="dark"] .modal-header,
+[data-theme="dark"] .modal-footer { border-color: var(--domus-border); }
+
+[data-theme="dark"] .table {
+  color: var(--domus-text);
+  border-color: var(--domus-border);
+}
+
+[data-theme="dark"] .table-striped > tbody > tr:nth-of-type(odd) > * {
+  background-color: rgba(255,255,255,0.03);
+  color: var(--domus-text);
+}
+
+[data-theme="dark"] .dropdown-menu {
+  background-color: var(--domus-card-bg);
+  border-color: var(--domus-border);
+}
+
+[data-theme="dark"] .dropdown-item { color: var(--domus-text); }
+
+[data-theme="dark"] .dropdown-item:hover {
+  background-color: rgba(79, 70, 229, 0.15);
+  color: var(--domus-text);
+}
+
+[data-theme="dark"] .btn-outline-secondary {
+  color: var(--domus-muted);
+  border-color: var(--domus-border);
+  background-color: transparent;
+}
+
+[data-theme="dark"] .btn-outline-secondary:hover,
+[data-theme="dark"] .btn-outline-secondary:focus-visible {
+  background-color: rgba(255, 255, 255, 0.08);
+  color: var(--domus-text);
+  border-color: var(--domus-border);
+}
+
+[data-theme="dark"] .btn-outline-secondary:active,
+[data-theme="dark"] .btn-outline-secondary:not(:disabled):not(.disabled):active {
+  background-color: rgba(255, 255, 255, 0.12);
+  color: var(--domus-text);
+  border-color: var(--domus-border);
+}
+
+[data-theme="dark"] .btn-outline-success {
+  color: #10b981;
+  border-color: #10b981;
+  background-color: transparent;
+}
+
+[data-theme="dark"] .btn-outline-success:hover,
+[data-theme="dark"] .btn-outline-success:focus-visible {
+  background-color: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+  border-color: #10b981;
+}
+
+[data-theme="dark"] .badge.bg-secondary {
+  background-color: var(--domus-border) !important;
+  color: var(--domus-text);
+}
+
+[data-theme="dark"] .alert-info {
+  background-color: rgba(79, 70, 229, 0.15);
+  border-color: rgba(79, 70, 229, 0.35);
+  color: var(--domus-text);
+}

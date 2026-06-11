@@ -1,0 +1,110 @@
+/* ── Outer wrapper ── */
+.school-sync-page {
+  /* no extra padding: .domus-main ya provee suficiente */
+}
+
+/* ── Mobile section tabs (hidden on desktop) ── */
+.school-sync-mobile-tabs { display: none; }
+
+/* ── Main two-column grid (emails | assignments) ── */
+.school-sync-main-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
+}
+
+/* ── By-subject course content grid ── */
+.school-sync-subject-grid {
+  display: grid;
+}
+
+.school-sync-subject-grid.two-col {
+  grid-template-columns: 1fr 1fr;
+}
+
+/* Border separating assignments from emails in two-col mode */
+.school-sync-subject-grid.two-col .school-sync-subject-assigns {
+  border-right: 1px solid var(--domus-border);
+}
+
+/* ── Responsive: tablet ── */
+@media (min-width: 769px) and (max-width: 1100px) {
+  .school-sync-main-grid { gap: 1rem; }
+}
+
+/* ── Responsive: mobile ── */
+@media (max-width: 768px) {
+  .school-sync-page {
+    padding: 0;
+  }
+
+  .school-sync-main-grid {
+    grid-template-columns: 1fr;
+    gap: 1.5rem;
+  }
+
+  .school-sync-subject-grid.two-col {
+    grid-template-columns: 1fr;
+  }
+
+  /* En mobile: borde inferior en vez de derecho */
+  .school-sync-subject-grid.two-col .school-sync-subject-assigns {
+    border-right: none;
+    border-bottom: 1px solid var(--domus-border);
+  }
+
+  /* ── Tab bar ── */
+  .school-sync-mobile-tabs {
+    display: flex;
+    border: 1px solid var(--domus-border);
+    border-radius: 10px;
+    overflow: hidden;
+    margin-bottom: 1rem;
+    background: var(--domus-card-bg);
+  }
+
+  .school-sync-mobile-tab {
+    flex: 1;
+    padding: 0.7rem 0.5rem;
+    font-size: 0.9rem;
+    font-weight: 600;
+    text-align: center;
+    background: transparent;
+    border: none;
+    color: var(--domus-muted);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+  }
+
+  .school-sync-mobile-tab + .school-sync-mobile-tab {
+    border-left: 1px solid var(--domus-border);
+  }
+
+  .school-sync-mobile-tab.active {
+    background: var(--domus-primary);
+    color: #fff;
+  }
+
+  .school-sync-tab-badge {
+    background: rgba(255,255,255,0.25);
+    border-radius: 20px;
+    padding: 0.05rem 0.45rem;
+    font-size: 0.75rem;
+    font-weight: 700;
+    min-width: 20px;
+    text-align: center;
+  }
+
+  .school-sync-mobile-tab:not(.active) .school-sync-tab-badge {
+    background: rgba(79,70,229,0.12);
+    color: var(--domus-primary);
+  }
+
+  /* Ocultar columna inactiva */
+  .school-sync-main-grid[data-mobile-tab="tasks"] .school-sync-emails-col { display: none; }
+  .school-sync-main-grid[data-mobile-tab="emails"] .school-sync-tasks-col { display: none; }
+}

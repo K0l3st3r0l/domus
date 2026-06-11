@@ -1,0 +1,32 @@
+:root {
+  --domus-primary: #4f46e5;
+  --domus-primary-dark: #3730a3;
+  --domus-secondary: #f59e0b;
+  --domus-bg: #f8fafc;
+  --domus-sidebar-bg: #1e1b4b;
+  --domus-sidebar-text: #c7d2fe;
+  --domus-sidebar-active: #4f46e5;
+  --domus-card-bg: #ffffff;
+  --domus-text: #1e293b;
+  --domus-muted: #64748b;
+  --domus-border: #e2e8f0;
+  --domus-input-bg: #ffffff;
+  --domus-income-bg: #d1fae5;
+  --domus-expense-bg: #fee2e2;
+  --domus-calendar-today: #ede9fe;
+}
+
+[data-theme="dark"] {
+  --domus-bg: #0f172a;
+  --domus-sidebar-bg: #0a0820;
+  --domus-sidebar-text: #a5b4fc;
+  --domus-sidebar-active: #4f46e5;
+  --domus-card-bg: #1e293b;
+  --domus-text: #f1f5f9;
+  --domus-muted: #94a3b8;
+  --domus-border: #334155;
+  --domus-input-bg: #1e293b;
+  --domus-income-bg: #064e3b;
+  --domus-expense-bg: #450a0a;
+  --domus-calendar-today: #312e81;
+}
