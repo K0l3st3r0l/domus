@@ -102,3 +102,7 @@ credentials.json
 config.prod.js
 .aws/
 .ssh/
+
+
+# Graphify - regenerar con: bash /root/apps/wiki/brain-setup.sh /root/apps
+graphify-out/
