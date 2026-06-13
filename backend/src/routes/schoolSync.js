@@ -22,12 +22,62 @@ function getOAuth2Client() {
   );
 }
 
-// GET /api/school-sync/status
+// ─── Permisos de familia ─────────────────────────────────────────────────────
+// parent → ve todos los hijos. child → solo el hijo cuyo email coincide con el suyo.
+
+async function getVisibleChildIds(user) {
+  if (!user) return [];
+  // family_role no viaja en JWTs viejos, así que se resuelve siempre desde users.
+  let familyRole = user.family_role;
+  let email = user.email;
+  if (!familyRole || !email) {
+    const r = await pool.query('SELECT email, family_role FROM users WHERE id = $1', [user.id]);
+    if (r.rows[0]) {
+      familyRole = r.rows[0].family_role || 'parent';
+      email = r.rows[0].email;
+    }
+  }
+  if (familyRole === 'child') {
+    const r = await pool.query('SELECT id FROM children WHERE email = $1', [email]);
+    return r.rows.map(x => x.id);
+  }
+  const r = await pool.query('SELECT id FROM children');
+  return r.rows.map(x => x.id);
+}
+
+async function getChildByEmail(email) {
+  const r = await pool.query('SELECT id, email, name FROM children WHERE email = $1', [email]);
+  return r.rows[0] || null;
+}
+
+async function getChildById(childId) {
+  const r = await pool.query('SELECT id, email, name FROM children WHERE id = $1', [childId]);
+  return r.rows[0] || null;
+}
+
+async function ensureChild(email, name) {
+  const existing = await getChildByEmail(email);
+  if (existing) return existing;
+  const r = await pool.query(
+    'INSERT INTO children (email, name) VALUES ($1, $2) ON CONFLICT (email) DO UPDATE SET name = COALESCE(children.name, EXCLUDED.name) RETURNING id, email, name',
+    [email, name || email.split('@')[0]]
+  );
+  return r.rows[0];
+}
+
+// ─── GET /api/school-sync/status ─────────────────────────────────────────────
+// Devuelve el estado por hijo (no por usuario). Toda la familia ve lo mismo.
 router.get('/status', authenticate, async (req, res) => {
   try {
     const result = await pool.query(
-      'SELECT child_email, child_name, last_sync, created_at, token_valid FROM google_tokens WHERE user_id = $1 ORDER BY child_name',
-      [req.user.id]
+      `SELECT c.email AS child_email, c.name AS child_name,
+              gt.last_sync, gt.created_at, gt.token_valid,
+              gt.connected_by_user_id, gt.connected_at,
+              u.name AS connected_by_name, u.email AS connected_by_email
+         FROM children c
+         LEFT JOIN google_tokens gt ON gt.child_id = c.id
+         LEFT JOIN users u ON u.id = gt.connected_by_user_id
+        ORDER BY c.name`
     );
     res.json({ connected: result.rows });
   } catch (err) {
@@ -36,14 +86,36 @@ router.get('/status', authenticate, async (req, res) => {
   }
 });
 
-// GET /api/school-sync/auth-url
+// ─── GET /api/school-sync/auth-url ───────────────────────────────────────────
+// Si ya existe token activo para ese hijo, responde 409 a menos que ?force=1.
 router.get('/auth-url', authenticate, async (req, res) => {
-  const { child_email, child_name } = req.query;
+  const { child_email, child_name, force } = req.query;
   if (!child_email) return res.status(400).json({ error: 'child_email requerido' });
 
-  // Encode user context in state JWT with short expiry to prevent stale OAuth flows
+  // Asegurar que el child existe (auto-creación al primer intento de conexión)
+  const child = await ensureChild(child_email, child_name);
+
+  if (!force) {
+    const existing = await pool.query(
+      `SELECT gt.token_valid, gt.connected_at, u.name AS connected_by_name, u.email AS connected_by_email
+         FROM google_tokens gt
+         LEFT JOIN users u ON u.id = gt.connected_by_user_id
+        WHERE gt.child_id = $1 AND gt.token_valid = TRUE`,
+      [child.id]
+    );
+    if (existing.rows.length > 0) {
+      const row = existing.rows[0];
+      return res.status(409).json({
+        error: 'already_connected',
+        connected_by_name: row.connected_by_name,
+        connected_by_email: row.connected_by_email,
+        connected_at: row.connected_at,
+      });
+    }
+  }
+
   const state = jwt.sign(
-    { userId: req.user.id, childEmail: child_email, childName: child_name || child_email },
+    { userId: req.user.id, childId: child.id, childEmail: child.email, childName: child.name },
     process.env.JWT_SECRET,
     { expiresIn: '10m' }
   );
@@ -59,17 +131,13 @@ router.get('/auth-url', authenticate, async (req, res) => {
   res.json({ url });
 });
 
-// GET /api/school-sync/callback — ruta pública (recibe redirect de Google)
+// ─── GET /api/school-sync/callback ───────────────────────────────────────────
 router.get('/callback', async (req, res) => {
   const { code, state, error } = req.query;
   const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3001';
 
-  if (error) {
-    return res.redirect(`${frontendUrl}/school-sync?error=${encodeURIComponent(error)}`);
-  }
-  if (!code || !state) {
-    return res.redirect(`${frontendUrl}/school-sync?error=missing_params`);
-  }
+  if (error) return res.redirect(`${frontendUrl}/school-sync?error=${encodeURIComponent(error)}`);
+  if (!code || !state) return res.redirect(`${frontendUrl}/school-sync?error=missing_params`);
 
   let decoded;
   try {
@@ -81,29 +149,29 @@ router.get('/callback', async (req, res) => {
   try {
     const oauth2Client = getOAuth2Client();
     const { tokens } = await oauth2Client.getToken(code);
-    const { userId, childEmail, childName } = decoded;
+    const { userId, childId, childEmail } = decoded;
 
     await pool.query(
-      `INSERT INTO google_tokens (user_id, child_email, child_name, access_token, refresh_token, token_expiry)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (user_id, child_email) DO UPDATE SET
-         access_token  = EXCLUDED.access_token,
-         refresh_token = COALESCE(EXCLUDED.refresh_token, google_tokens.refresh_token),
-         token_expiry  = EXCLUDED.token_expiry,
-         token_valid   = TRUE,
-         updated_at    = NOW()`,
+      `INSERT INTO google_tokens (child_id, access_token, refresh_token, token_expiry, connected_by_user_id, connected_at)
+       VALUES ($1, $2, $3, $4, $5, NOW())
+       ON CONFLICT (child_id) DO UPDATE SET
+         access_token         = EXCLUDED.access_token,
+         refresh_token        = COALESCE(EXCLUDED.refresh_token, google_tokens.refresh_token),
+         token_expiry         = EXCLUDED.token_expiry,
+         token_valid          = TRUE,
+         connected_by_user_id = EXCLUDED.connected_by_user_id,
+         connected_at         = NOW(),
+         updated_at           = NOW()`,
       [
-        userId,
-        childEmail,
-        childName,
+        childId,
         tokens.access_token,
         tokens.refresh_token,
         tokens.expiry_date ? new Date(tokens.expiry_date) : null,
+        userId,
       ]
     );
 
-    // Trigger initial sync in background (don't block redirect)
-    syncChild(userId, childEmail).catch(err =>
+    syncChild(childId).catch(err =>
       console.error('Error en sync inicial:', err.message)
     );
 
@@ -114,18 +182,22 @@ router.get('/callback', async (req, res) => {
   }
 });
 
-// POST /api/school-sync/sync
+// ─── POST /api/school-sync/sync ──────────────────────────────────────────────
 router.post('/sync', authenticate, async (req, res) => {
   try {
+    const visibleIds = await getVisibleChildIds(req.user);
     const result = await pool.query(
-      'SELECT child_email, child_name FROM google_tokens WHERE user_id = $1',
-      [req.user.id]
+      `SELECT c.id, c.email, c.name
+         FROM children c
+         JOIN google_tokens gt ON gt.child_id = c.id
+        WHERE c.id = ANY($1::int[]) AND gt.token_valid = TRUE
+        ORDER BY c.name`,
+      [visibleIds]
     );
 
     const children = result.rows;
     const userId = req.user.id;
 
-    // Steps per child: auth, gmail, tareas, anuncios, IA = 5
     const STEPS_PER_CHILD = 5;
     syncProgress.set(userId, {
       running: true, done: false,
@@ -133,7 +205,6 @@ router.post('/sync', authenticate, async (req, res) => {
       stepLabel: 'Iniciando…', error: null,
     });
 
-    // Respond immediately to avoid Cloudflare 524 timeout; sync runs in background
     res.json({ success: true, synced: children.length, background: true });
 
     const step = (label) => {
@@ -142,8 +213,8 @@ router.post('/sync', authenticate, async (req, res) => {
     };
 
     for (const row of children) {
-      await syncChild(userId, row.child_email, step, row.child_name).catch(err =>
-        console.error(`Error en sync manual (${row.child_email}):`, err.message)
+      await syncChild(row.id, step, row.name).catch(err =>
+        console.error(`Error en sync manual (${row.email}):`, err.message)
       );
     }
 
@@ -157,55 +228,77 @@ router.post('/sync', authenticate, async (req, res) => {
   }
 });
 
-// GET /api/school-sync/emails
+// ─── GET /api/school-sync/emails ─────────────────────────────────────────────
 router.get('/emails', authenticate, async (req, res) => {
   const { child } = req.query;
   try {
-    const params = [req.user.id];
-    let query = 'SELECT * FROM school_emails WHERE user_id = $1';
+    const visibleIds = await getVisibleChildIds(req.user);
+    if (visibleIds.length === 0) return res.json([]);
+
+    let filterIds = visibleIds;
     if (child) {
-      query += ' AND child_email = $2';
-      params.push(child);
+      const c = await getChildByEmail(child);
+      if (!c || !visibleIds.includes(c.id)) return res.json([]);
+      filterIds = [c.id];
     }
-    query += ' ORDER BY date DESC NULLS LAST LIMIT 200';
-    const result = await pool.query(query, params);
+
+    const result = await pool.query(
+      `SELECT se.*, c.email AS child_email, c.name AS child_name
+         FROM school_emails se
+         JOIN children c ON c.id = se.child_id
+        WHERE se.child_id = ANY($1::int[])
+        ORDER BY se.date DESC NULLS LAST
+        LIMIT 200`,
+      [filterIds]
+    );
     res.json(result.rows);
   } catch (err) {
+    console.error('Error en /emails:', err);
     res.status(500).json({ error: 'Error del servidor' });
   }
 });
 
-// GET /api/school-sync/assignments
+// ─── GET /api/school-sync/assignments ────────────────────────────────────────
 router.get('/assignments', authenticate, async (req, res) => {
   const { child } = req.query;
   try {
-    const params = [req.user.id];
-    let query = 'SELECT * FROM school_assignments WHERE user_id = $1';
+    const visibleIds = await getVisibleChildIds(req.user);
+    if (visibleIds.length === 0) return res.json([]);
+
+    let filterIds = visibleIds;
     if (child) {
-      query += ' AND child_email = $2';
-      params.push(child);
+      const c = await getChildByEmail(child);
+      if (!c || !visibleIds.includes(c.id)) return res.json([]);
+      filterIds = [c.id];
     }
-    query += ' ORDER BY due_date ASC NULLS LAST';
-    const result = await pool.query(query, params);
+
+    const result = await pool.query(
+      `SELECT sa.*, c.email AS child_email, c.name AS child_name
+         FROM school_assignments sa
+         JOIN children c ON c.id = sa.child_id
+        WHERE sa.child_id = ANY($1::int[])
+        ORDER BY sa.due_date ASC NULLS LAST`,
+      [filterIds]
+    );
     res.json(result.rows);
   } catch (err) {
+    console.error('Error en /assignments:', err);
     res.status(500).json({ error: 'Error del servidor' });
   }
 });
 
-// POST /api/school-sync/sync-to-calendar
+// ─── POST /api/school-sync/sync-to-calendar ─────────────────────────────────
 router.post('/sync-to-calendar', authenticate, async (req, res) => {
   const { assignmentId, suggestedDate } = req.body;
   if (!assignmentId) return res.status(400).json({ error: 'assignmentId requerido' });
 
   try {
+    const visibleIds = await getVisibleChildIds(req.user);
     const assignResult = await pool.query(
-      'SELECT * FROM school_assignments WHERE id = $1 AND user_id = $2',
-      [assignmentId, req.user.id]
+      'SELECT * FROM school_assignments WHERE id = $1 AND child_id = ANY($2::int[])',
+      [assignmentId, visibleIds]
     );
-    if (assignResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Tarea no encontrada' });
-    }
+    if (assignResult.rows.length === 0) return res.status(404).json({ error: 'Tarea no encontrada' });
     const task = assignResult.rows[0];
 
     if (task.synced_to_calendar) {
@@ -213,7 +306,6 @@ router.post('/sync-to-calendar', authenticate, async (req, res) => {
     }
 
     const description = [task.course_name, task.description].filter(Boolean).join('\n');
-    // Use suggestedDate (from schedule) > due_date > today
     const startTime = suggestedDate ? new Date(suggestedDate) : (task.due_date || new Date());
     const eventResult = await pool.query(
       `INSERT INTO calendar_events (title, description, start_time, end_time, all_day, color, created_by)
@@ -233,29 +325,30 @@ router.post('/sync-to-calendar', authenticate, async (req, res) => {
   }
 });
 
-// GET /api/school-sync/emails/:gmailId/body
+// ─── GET /api/school-sync/emails/:gmailId/body ──────────────────────────────
 router.get('/emails/:gmailId/body', authenticate, async (req, res) => {
   const { gmailId } = req.params;
   try {
+    const visibleIds = await getVisibleChildIds(req.user);
     const emailResult = await pool.query(
-      'SELECT * FROM school_emails WHERE gmail_id = $1 AND user_id = $2',
-      [gmailId, req.user.id]
+      `SELECT se.*, c.email AS child_email
+         FROM school_emails se
+         JOIN children c ON c.id = se.child_id
+        WHERE se.gmail_id = $1 AND se.child_id = ANY($2::int[])`,
+      [gmailId, visibleIds]
     );
-    if (emailResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Correo no encontrado' });
-    }
+    if (emailResult.rows.length === 0) return res.status(404).json({ error: 'Correo no encontrado' });
     const emailRow = emailResult.rows[0];
 
     const existingAtts = Array.isArray(emailRow.attachments) ? emailRow.attachments : [];
-    const gmailAttsAlreadyFetched = emailRow.attachments !== null; // null = never fetched; [] = fetched, none found
+    const gmailAttsAlreadyFetched = emailRow.attachments !== null;
 
-    // Classroom announcements: body + attachments already stored, return from cache
     if (gmailId.startsWith('classroom:ann:')) {
       if (emailRow.body) {
         return res.json({ body: emailRow.body, htmlBody: null, attachments: existingAtts });
       }
       const [, , courseId, announcementId] = gmailId.split(':');
-      const auth = await getAuthClientForChild(req.user.id, emailRow.child_email);
+      const auth = await getAuthClient(emailRow.child_id);
       const classroom = google.classroom({ version: 'v1', auth });
       const detail = await classroom.courses.announcements.get({ courseId, id: announcementId });
       const bodyText = detail.data?.text || emailRow.snippet || null;
@@ -266,25 +359,18 @@ router.get('/emails/:gmailId/body', authenticate, async (req, res) => {
       return res.json({ body: bodyText, htmlBody: null, attachments: existingAtts });
     }
 
-    // If body AND gmail attachments are already cached, return immediately
     if ((emailRow.body || emailRow.html_body) && gmailAttsAlreadyFetched) {
       return res.json({ body: emailRow.body || null, htmlBody: emailRow.html_body || null, attachments: existingAtts });
     }
 
-    // Fetch full message from Gmail API (either body missing or attachments not yet extracted)
-    const auth = await getAuthClientForChild(req.user.id, emailRow.child_email);
+    const auth = await getAuthClient(emailRow.child_id);
     const gmail = google.gmail({ version: 'v1', auth });
-    const detail = await gmail.users.messages.get({
-      userId: 'me',
-      id: gmailId,
-      format: 'full',
-    });
+    const detail = await gmail.users.messages.get({ userId: 'me', id: gmailId, format: 'full' });
 
     const textBody = emailRow.body || extractTextBody(detail.data.payload);
     const htmlBody = emailRow.html_body || extractHtmlBody(detail.data.payload);
     const gmailAttachments = extractAttachments(detail.data.payload);
 
-    // Merge Gmail attachments with existing Classroom attachments
     const mergedAtts = existingAtts.filter(a => a.type !== 'gmail');
     for (const a of gmailAttachments) mergedAtts.push({ ...a, type: 'gmail' });
 
@@ -297,23 +383,24 @@ router.get('/emails/:gmailId/body', authenticate, async (req, res) => {
   } catch (err) {
     console.error('Error fetching email body:', err);
     if (isTokenRevokedError(err)) {
-      const emailResult2 = await pool.query('SELECT child_email FROM school_emails WHERE gmail_id = $1 AND user_id = $2', [req.params.gmailId, req.user.id]).catch(() => null);
-      if (emailResult2?.rows[0]?.child_email) {
-        await markTokenInvalid(req.user.id, emailResult2.rows[0].child_email);
-      }
+      const r = await pool.query('SELECT child_id FROM school_emails WHERE gmail_id = $1', [req.params.gmailId]).catch(() => null);
+      if (r?.rows[0]?.child_id) await markTokenInvalid(r.rows[0].child_id);
       return res.status(401).json({ error: 'token_revoked' });
     }
     res.status(500).json({ error: 'Error del servidor' });
   }
 });
 
-// GET /api/school-sync/emails/:gmailId/attachments/:attachmentId
+// ─── GET /api/school-sync/emails/:gmailId/attachments/:attachmentId ──────────
 router.get('/emails/:gmailId/attachments/:attachmentId', authenticate, async (req, res) => {
   const { gmailId, attachmentId } = req.params;
   try {
+    const visibleIds = await getVisibleChildIds(req.user);
     const emailResult = await pool.query(
-      'SELECT child_email, attachments FROM school_emails WHERE gmail_id = $1 AND user_id = $2',
-      [gmailId, req.user.id]
+      `SELECT child_id, attachments
+         FROM school_emails
+        WHERE gmail_id = $1 AND child_id = ANY($2::int[])`,
+      [gmailId, visibleIds]
     );
     if (emailResult.rows.length === 0) return res.status(404).json({ error: 'Correo no encontrado' });
 
@@ -322,7 +409,7 @@ router.get('/emails/:gmailId/attachments/:attachmentId', authenticate, async (re
     const meta = atts.find(a => a.attachmentId === attachmentId);
     if (!meta) return res.status(404).json({ error: 'Adjunto no encontrado' });
 
-    const auth = await getAuthClientForChild(req.user.id, emailRow.child_email);
+    const auth = await getAuthClient(emailRow.child_id);
     const gmail = google.gmail({ version: 'v1', auth });
     const attRes = await gmail.users.messages.attachments.get({
       userId: 'me',
@@ -341,19 +428,20 @@ router.get('/emails/:gmailId/attachments/:attachmentId', authenticate, async (re
   }
 });
 
-// POST /api/school-sync/sync-to-calendar/bulk
+// ─── POST /api/school-sync/sync-to-calendar/bulk ─────────────────────────────
 router.post('/sync-to-calendar/bulk', authenticate, async (req, res) => {
   const { assignmentIds } = req.body;
   if (!Array.isArray(assignmentIds) || assignmentIds.length === 0) {
     return res.status(400).json({ error: 'assignmentIds requerido' });
   }
 
+  const visibleIds = await getVisibleChildIds(req.user);
   const results = [];
   for (const id of assignmentIds) {
     try {
       const assignResult = await pool.query(
-        'SELECT * FROM school_assignments WHERE id = $1 AND user_id = $2',
-        [id, req.user.id]
+        'SELECT * FROM school_assignments WHERE id = $1 AND child_id = ANY($2::int[])',
+        [id, visibleIds]
       );
       if (assignResult.rows.length === 0) {
         results.push({ id, error: 'no encontrada' });
@@ -365,7 +453,7 @@ router.post('/sync-to-calendar/bulk', authenticate, async (req, res) => {
         continue;
       }
       const description = [task.course_name, task.description].filter(Boolean).join('\n');
-      const startTime = task.due_date || new Date(); // Default to today if no due date
+      const startTime = task.due_date || new Date();
       const eventResult = await pool.query(
         `INSERT INTO calendar_events (title, description, start_time, end_time, all_day, color, created_by)
          VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
@@ -384,30 +472,26 @@ router.post('/sync-to-calendar/bulk', authenticate, async (req, res) => {
   res.json({ results });
 });
 
-// POST /api/school-sync/sync-email-to-calendar
+// ─── POST /api/school-sync/sync-email-to-calendar ────────────────────────────
 router.post('/sync-email-to-calendar', authenticate, async (req, res) => {
   const { emailId } = req.body;
-  if (!emailId) {
-    return res.status(400).json({ error: 'emailId requerido' });
-  }
+  if (!emailId) return res.status(400).json({ error: 'emailId requerido' });
 
   try {
+    const visibleIds = await getVisibleChildIds(req.user);
     const emailResult = await pool.query(
-      'SELECT * FROM school_emails WHERE id = $1 AND user_id = $2',
-      [emailId, req.user.id]
+      'SELECT * FROM school_emails WHERE id = $1 AND child_id = ANY($2::int[])',
+      [emailId, visibleIds]
     );
-    if (emailResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Correo no encontrado' });
-    }
+    if (emailResult.rows.length === 0) return res.status(404).json({ error: 'Correo no encontrado' });
 
     const email = emailResult.rows[0];
-
     if (email.calendar_event_id) {
       return res.status(400).json({ error: 'Este correo ya fue agregado al calendario' });
     }
 
     const extractedDate = email.extracted_date || email.date || new Date();
-    const schedule = await getScheduleForChild(req.user.id, email.child_email);
+    const schedule = await getScheduleForChild(email.child_id);
     const timing = inferCalendarTimingFromSchedule({
       subject: email.subject,
       summary: email.ai_summary || email.snippet || 'Reunión detectada',
@@ -432,12 +516,18 @@ router.post('/sync-email-to-calendar', authenticate, async (req, res) => {
   }
 });
 
-// GET /api/school-sync/schedules
+// ─── GET /api/school-sync/schedules ──────────────────────────────────────────
 router.get('/schedules', authenticate, async (req, res) => {
   try {
+    const visibleIds = await getVisibleChildIds(req.user);
+    if (visibleIds.length === 0) return res.json([]);
     const result = await pool.query(
-      'SELECT * FROM school_schedules WHERE user_id = $1 ORDER BY child_email, day_of_week, period_order',
-      [req.user.id]
+      `SELECT ss.*, c.email AS child_email, c.name AS child_name
+         FROM school_schedules ss
+         JOIN children c ON c.id = ss.child_id
+        WHERE ss.child_id = ANY($1::int[])
+        ORDER BY c.email, ss.day_of_week, ss.period_order`,
+      [visibleIds]
     );
     res.json(result.rows);
   } catch (err) {
@@ -446,22 +536,24 @@ router.get('/schedules', authenticate, async (req, res) => {
   }
 });
 
-// POST /api/school-sync/schedules — reemplaza todos los bloques de un hijo
+// ─── POST /api/school-sync/schedules ─────────────────────────────────────────
 router.post('/schedules', authenticate, async (req, res) => {
   const { child_email, schedule } = req.body;
   if (!child_email || !Array.isArray(schedule)) {
     return res.status(400).json({ error: 'child_email y schedule[] requeridos' });
   }
   try {
-    await pool.query(
-      'DELETE FROM school_schedules WHERE user_id = $1 AND child_email = $2',
-      [req.user.id, child_email]
-    );
+    const visibleIds = await getVisibleChildIds(req.user);
+    const child = await getChildByEmail(child_email);
+    if (!child || !visibleIds.includes(child.id)) {
+      return res.status(403).json({ error: 'No tienes permiso sobre este hijo' });
+    }
+    await pool.query('DELETE FROM school_schedules WHERE child_id = $1', [child.id]);
     for (const entry of schedule) {
       await pool.query(
-        `INSERT INTO school_schedules (user_id, child_email, day_of_week, period_order, subject, start_time, end_time)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [req.user.id, child_email, entry.day_of_week, entry.period_order, entry.subject,
+        `INSERT INTO school_schedules (child_id, day_of_week, period_order, subject, start_time, end_time)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [child.id, entry.day_of_week, entry.period_order, entry.subject,
          entry.start_time || null, entry.end_time || null]
       );
     }
@@ -472,14 +564,15 @@ router.post('/schedules', authenticate, async (req, res) => {
   }
 });
 
-// DELETE /api/school-sync/schedules/:childEmail — borra el horario de un hijo
+// ─── DELETE /api/school-sync/schedules/:childEmail ───────────────────────────
 router.delete('/schedules/:childEmail', authenticate, async (req, res) => {
-  const { childEmail } = req.params;
   try {
-    await pool.query(
-      'DELETE FROM school_schedules WHERE user_id = $1 AND child_email = $2',
-      [req.user.id, decodeURIComponent(childEmail)]
-    );
+    const visibleIds = await getVisibleChildIds(req.user);
+    const child = await getChildByEmail(decodeURIComponent(req.params.childEmail));
+    if (!child || !visibleIds.includes(child.id)) {
+      return res.status(403).json({ error: 'No tienes permiso sobre este hijo' });
+    }
+    await pool.query('DELETE FROM school_schedules WHERE child_id = $1', [child.id]);
     res.json({ success: true });
   } catch (err) {
     console.error('Error borrando horarios:', err);
@@ -487,26 +580,29 @@ router.delete('/schedules/:childEmail', authenticate, async (req, res) => {
   }
 });
 
-// DELETE /api/school-sync/disconnect
+// ─── DELETE /api/school-sync/disconnect ──────────────────────────────────────
 router.delete('/disconnect', authenticate, async (req, res) => {
   const { child_email } = req.body;
   if (!child_email) return res.status(400).json({ error: 'child_email requerido' });
 
   try {
-    const result = await pool.query(
-      'DELETE FROM google_tokens WHERE user_id = $1 AND child_email = $2 RETURNING id',
-      [req.user.id, child_email]
-    );
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Cuenta no encontrada' });
+    const visibleIds = await getVisibleChildIds(req.user);
+    const child = await getChildByEmail(child_email);
+    if (!child || !visibleIds.includes(child.id)) {
+      return res.status(403).json({ error: 'No tienes permiso sobre este hijo' });
     }
+    const result = await pool.query(
+      'DELETE FROM google_tokens WHERE child_id = $1 RETURNING id',
+      [child.id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Cuenta no encontrada' });
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: 'Error del servidor' });
   }
 });
 
-// GET /api/school-sync/token-stats — AI token usage stats for tuning max_tokens
+// ─── GET /api/school-sync/token-stats ────────────────────────────────────────
 router.get('/token-stats', authenticate, async (req, res) => {
   const stats = getTokenStats();
   const health = checkTokenHealth();
@@ -514,15 +610,10 @@ router.get('/token-stats', authenticate, async (req, res) => {
   res.json({ ...stats, health });
 });
 
-// ─── In-memory reprocess progress store ──────────────────────────────────────
-// keyed by userId; cleared after client reads a completed job
+// ─── In-memory progress stores ───────────────────────────────────────────────
 const reprocessProgress = new Map();
-
-// ─── In-memory sync progress store ──────────────────────────────────────────
-// { running, done, step, stepLabel, completed, total, childName, error }
 const syncProgress = new Map();
 
-// GET /api/school-sync/sync/progress
 router.get('/sync/progress', authenticate, (req, res) => {
   const progress = syncProgress.get(req.user.id);
   if (!progress) return res.json({ running: false, done: true, pct: 100 });
@@ -531,21 +622,18 @@ router.get('/sync/progress', authenticate, (req, res) => {
   if (progress.done) syncProgress.delete(req.user.id);
 });
 
-// GET /api/school-sync/reprocess/progress
 router.get('/reprocess/progress', authenticate, (req, res) => {
   const progress = reprocessProgress.get(req.user.id);
   if (!progress) return res.json({ running: false });
-
   res.json(progress);
-
-  // Clean up once the client has seen the completed result
   if (progress.done) reprocessProgress.delete(req.user.id);
 });
 
-// POST /api/school-sync/process-emails — process unread emails with AI
+// ─── POST /api/school-sync/process-emails ────────────────────────────────────
 router.post('/process-emails', authenticate, async (req, res) => {
   try {
-    const result = await processUnreadEmails(req.user.id);
+    const visibleIds = await getVisibleChildIds(req.user);
+    const result = await processUnreadEmails(visibleIds, req.user.id);
     res.json({ success: true, processed: result.count, created: result.eventsCreated });
   } catch (err) {
     console.error('Error processing emails:', err);
@@ -553,15 +641,12 @@ router.post('/process-emails', authenticate, async (req, res) => {
   }
 });
 
-// POST /api/school-sync/reprocess — starts background reprocess, returns immediately
+// ─── POST /api/school-sync/reprocess ─────────────────────────────────────────
 router.post('/reprocess', authenticate, (req, res) => {
   const { dateFrom, dateTo } = req.body;
-  if (!dateFrom || !dateTo) {
-    return res.status(400).json({ error: 'dateFrom y dateTo requeridos' });
-  }
+  if (!dateFrom || !dateTo) return res.status(400).json({ error: 'dateFrom y dateTo requeridos' });
 
   const userId = req.user.id;
-
   if (reprocessProgress.get(userId)?.running) {
     return res.status(409).json({ error: 'Ya hay un reprocesamiento en curso' });
   }
@@ -569,12 +654,16 @@ router.post('/reprocess', authenticate, (req, res) => {
   reprocessProgress.set(userId, { running: true, done: false, total: 0, processed: 0, eventsCreated: 0, error: null });
   res.json({ started: true });
 
-  // Run in background — no await
-  reprocessEmailsByRange(userId, dateFrom, dateTo, reprocessProgress).catch(err => {
-    console.error('Error reprocessing emails:', err);
-    const prev = reprocessProgress.get(userId) || {};
-    reprocessProgress.set(userId, { ...prev, running: false, done: true, error: err.message });
-  });
+  (async () => {
+    try {
+      const visibleIds = await getVisibleChildIds(req.user);
+      await reprocessEmailsByRange(visibleIds, userId, dateFrom, dateTo, reprocessProgress);
+    } catch (err) {
+      console.error('Error reprocessing emails:', err);
+      const prev = reprocessProgress.get(userId) || {};
+      reprocessProgress.set(userId, { ...prev, running: false, done: true, error: err.message });
+    }
+  })();
 });
 
 // ─── Email body parsing helpers ──────────────────────────────────────────────
@@ -584,11 +673,11 @@ function decodeBase64Url(data) {
   return Buffer.from(b64, 'base64').toString('utf8');
 }
 
-async function fetchBodyIfMissing(userId, email) {
+async function fetchBodyIfMissing(childId, email) {
   if (email.body) return email.body.slice(0, 1500);
   if (!email.gmail_id || email.gmail_id.startsWith('classroom:')) return email.snippet;
   try {
-    const auth = await getAuthClientForChild(userId, email.child_email);
+    const auth = await getAuthClient(childId);
     const gmail = google.gmail({ version: 'v1', auth });
     const detail = await gmail.users.messages.get({ userId: 'me', id: email.gmail_id, format: 'full' });
     const textBody = extractTextBody(detail.data.payload);
@@ -635,7 +724,6 @@ function extractAttachments(payload, results = []) {
   if (!payload) return results;
   const { mimeType, filename, body, parts, headers } = payload;
 
-  // Gmail sometimes puts filename only in Content-Disposition header, not on the part directly
   let effectiveFilename = filename;
   if (!effectiveFilename && headers) {
     const cd = headers.find(h => h.name.toLowerCase() === 'content-disposition')?.value || '';
@@ -658,7 +746,7 @@ function extractAttachments(payload, results = []) {
   return results;
 }
 
-// ─── Funciones internas de sincronización ────────────────────────────────────
+// ─── Sync internals (todos basados en childId) ───────────────────────────────
 
 function isTokenRevokedError(err) {
   const msg = (err?.message || '').toLowerCase();
@@ -669,21 +757,19 @@ function isTokenRevokedError(err) {
     (err?.response?.data?.error === 'invalid_grant');
 }
 
-async function markTokenInvalid(userId, childEmail) {
+async function markTokenInvalid(childId) {
   pool.query(
-    'UPDATE google_tokens SET token_valid = FALSE WHERE user_id = $1 AND child_email = $2',
-    [userId, childEmail]
+    'UPDATE google_tokens SET token_valid = FALSE WHERE child_id = $1',
+    [childId]
   ).catch(e => console.error('Error marcando token inválido:', e.message));
 }
 
-async function getAuthClientForChild(userId, childEmail) {
+async function getAuthClient(childId) {
   const result = await pool.query(
-    'SELECT * FROM google_tokens WHERE user_id = $1 AND child_email = $2',
-    [userId, childEmail]
+    'SELECT * FROM google_tokens WHERE child_id = $1',
+    [childId]
   );
-  if (result.rows.length === 0) {
-    throw new Error(`No hay tokens para ${childEmail}`);
-  }
+  if (result.rows.length === 0) throw new Error(`No hay tokens para child_id=${childId}`);
 
   const row = result.rows[0];
   const oauth2Client = getOAuth2Client();
@@ -693,7 +779,6 @@ async function getAuthClientForChild(userId, childEmail) {
     expiry_date: row.token_expiry ? new Date(row.token_expiry).getTime() : undefined,
   });
 
-  // Persist refreshed tokens automatically and restore token_valid flag
   oauth2Client.on('tokens', async (tokens) => {
     const sets = ['updated_at = NOW()', 'token_valid = TRUE'];
     const vals = [];
@@ -709,10 +794,10 @@ async function getAuthClientForChild(userId, childEmail) {
       sets.push(`token_expiry = $${vals.length + 1}`);
       vals.push(new Date(tokens.expiry_date));
     }
-    vals.push(userId, childEmail);
+    vals.push(childId);
     pool
       .query(
-        `UPDATE google_tokens SET ${sets.join(', ')} WHERE user_id = $${vals.length - 1} AND child_email = $${vals.length}`,
+        `UPDATE google_tokens SET ${sets.join(', ')} WHERE child_id = $${vals.length}`,
         vals
       )
       .catch(err => console.error('Error guardando tokens renovados:', err.message));
@@ -721,10 +806,10 @@ async function getAuthClientForChild(userId, childEmail) {
   return oauth2Client;
 }
 
-async function getScheduleForChild(userId, childEmail) {
+async function getScheduleForChild(childId) {
   const result = await pool.query(
-    'SELECT day_of_week, subject, start_time, end_time FROM school_schedules WHERE user_id = $1 AND child_email = $2 ORDER BY day_of_week, start_time',
-    [userId, childEmail]
+    'SELECT day_of_week, subject, start_time, end_time FROM school_schedules WHERE child_id = $1 ORDER BY day_of_week, start_time',
+    [childId]
   );
   return result.rows;
 }
@@ -732,7 +817,7 @@ async function getScheduleForChild(userId, childEmail) {
 function normalizeSubject(str) {
   return (str || '')
     .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[̀-ͯ]/g, '')
     .toUpperCase()
     .replace(/[^A-Z0-9\s]/g, ' ')
     .replace(/\s+/g, ' ')
@@ -790,32 +875,31 @@ function inferCalendarTimingFromSchedule({ subject, summary, extractedDate, sche
   return { startTime, endTime, allDay: false };
 }
 
-async function processUnreadEmails(userId) {
+async function processUnreadEmails(visibleChildIds, userId) {
   let processedCount = 0;
   let eventsCreated = 0;
 
   try {
     const emails = await pool.query(
-      `SELECT id, gmail_id, child_email, subject, snippet, body, date FROM school_emails
-       WHERE user_id = $1
+      `SELECT id, gmail_id, child_id, subject, snippet, body, date FROM school_emails
+       WHERE child_id = ANY($1::int[])
          AND is_read = false
          AND ai_processed = false
          AND (date IS NULL OR date >= CURRENT_DATE - INTERVAL '60 days')
        ORDER BY date ASC`,
-      [userId]
+      [visibleChildIds]
     );
 
     const scheduleCache = {};
     for (const email of emails.rows) {
       try {
-        if (!scheduleCache[email.child_email]) {
-          scheduleCache[email.child_email] = await getScheduleForChild(userId, email.child_email);
+        if (!scheduleCache[email.child_id]) {
+          scheduleCache[email.child_id] = await getScheduleForChild(email.child_id);
         }
-        const schedule = scheduleCache[email.child_email];
-        const content = await fetchBodyIfMissing(userId, email);
+        const schedule = scheduleCache[email.child_id];
+        const content = await fetchBodyIfMissing(email.child_id, email);
         const { extractedDate, type, summary, model } = await processEmail(email.subject, content, email.date, schedule);
 
-        // Save AI processing results
         await pool.query(
           `UPDATE school_emails
            SET ai_processed = true, ai_summary = $1, extracted_date = $2, ai_model = $3, ai_type = $4
@@ -824,7 +908,6 @@ async function processUnreadEmails(userId) {
         );
         processedCount++;
 
-        // Auto-create calendar event if date was extracted and is in the future
         if (extractedDate && extractedDate >= new Date()) {
           try {
             const existingForEmail = await pool.query(
@@ -833,23 +916,18 @@ async function processUnreadEmails(userId) {
             );
             let alreadyExists = existingForEmail.rows.length > 0;
 
-            if (!alreadyExists) {
+            if (!alreadyExists && userId) {
               const dup = await pool.query(
                 `SELECT id FROM calendar_events
-                 WHERE created_by = $1
-                   AND title = $2
-                   AND start_time::date = $3::date`,
+                 WHERE created_by = $1 AND title = $2 AND start_time::date = $3::date`,
                 [userId, `🗓️ ${email.subject}`, extractedDate]
               );
               alreadyExists = dup.rows.length > 0;
             }
 
-            if (!alreadyExists) {
+            if (!alreadyExists && userId) {
               const timing = inferCalendarTimingFromSchedule({
-                subject: email.subject,
-                summary,
-                extractedDate,
-                schedule,
+                subject: email.subject, summary, extractedDate, schedule,
               });
               const insertResult = await pool.query(
                 `INSERT INTO calendar_events (title, description, start_time, end_time, all_day, color, created_by)
@@ -879,7 +957,7 @@ async function processUnreadEmails(userId) {
   }
 }
 
-async function reprocessEmailsByRange(userId, dateFrom, dateTo, progressStore) {
+async function reprocessEmailsByRange(visibleChildIds, userId, dateFrom, dateTo, progressStore) {
   let processedCount = 0;
   let eventsCreated = 0;
 
@@ -894,12 +972,11 @@ async function reprocessEmailsByRange(userId, dateFrom, dateTo, progressStore) {
     toDate.setHours(23, 59, 59, 999);
 
     const emails = await pool.query(
-      `SELECT id, gmail_id, child_email, subject, snippet, body, date FROM school_emails
-       WHERE user_id = $1
-         AND date >= $2
-         AND date <= $3
+      `SELECT id, gmail_id, child_id, subject, snippet, body, date FROM school_emails
+       WHERE child_id = ANY($1::int[])
+         AND date >= $2 AND date <= $3
        ORDER BY date ASC`,
-      [userId, fromDate, toDate]
+      [visibleChildIds, fromDate, toDate]
     );
 
     setProgress({ total: emails.rows.length, processed: 0, eventsCreated: 0 });
@@ -907,11 +984,11 @@ async function reprocessEmailsByRange(userId, dateFrom, dateTo, progressStore) {
     const scheduleCache = {};
     for (const email of emails.rows) {
       try {
-        if (!scheduleCache[email.child_email]) {
-          scheduleCache[email.child_email] = await getScheduleForChild(userId, email.child_email);
+        if (!scheduleCache[email.child_id]) {
+          scheduleCache[email.child_id] = await getScheduleForChild(email.child_id);
         }
-        const schedule = scheduleCache[email.child_email];
-        const content = await fetchBodyIfMissing(userId, email);
+        const schedule = scheduleCache[email.child_id];
+        const content = await fetchBodyIfMissing(email.child_id, email);
         const { extractedDate, type, summary, model } = await processEmail(email.subject, content, email.date, schedule);
 
         await pool.query(
@@ -934,9 +1011,7 @@ async function reprocessEmailsByRange(userId, dateFrom, dateTo, progressStore) {
             if (!alreadyExists) {
               const dup = await pool.query(
                 `SELECT id FROM calendar_events
-                 WHERE created_by = $1
-                   AND title = $2
-                   AND start_time::date = $3::date`,
+                 WHERE created_by = $1 AND title = $2 AND start_time::date = $3::date`,
                 [userId, `🗓️ ${email.subject}`, extractedDate]
               );
               alreadyExists = dup.rows.length > 0;
@@ -944,10 +1019,7 @@ async function reprocessEmailsByRange(userId, dateFrom, dateTo, progressStore) {
 
             if (!alreadyExists) {
               const timing = inferCalendarTimingFromSchedule({
-                subject: email.subject,
-                summary,
-                extractedDate,
-                schedule,
+                subject: email.subject, summary, extractedDate, schedule,
               });
               const insertResult = await pool.query(
                 `INSERT INTO calendar_events (title, description, start_time, end_time, all_day, color, created_by)
@@ -979,12 +1051,9 @@ async function reprocessEmailsByRange(userId, dateFrom, dateTo, progressStore) {
   }
 }
 
-async function syncGmail(userId, childEmail, auth) {
+async function syncGmail(childId, auth) {
   const gmail = google.gmail({ version: 'v1', auth });
 
-  // Use narrow queries and dedupe the results to avoid Gmail search precedence issues.
-  // Parent-forwarded emails may not always keep mhrehbein@gmail.com in the From header,
-  // so we also search for the parent email anywhere in the message metadata/body.
   const queries = [
     { q: 'from:cicpm.cl newer_than:60d', includeSpamTrash: false },
     { q: 'from:classroom.google.com newer_than:60d', includeSpamTrash: false },
@@ -1035,15 +1104,15 @@ async function syncGmail(userId, childEmail, auth) {
     const isUnread = detail.data.labelIds?.includes('UNREAD') || false;
 
     await pool.query(
-      `INSERT INTO school_emails (user_id, child_email, gmail_id, from_address, subject, snippet, date, is_read)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `INSERT INTO school_emails (child_id, gmail_id, from_address, subject, snippet, date, is_read)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        ON CONFLICT (gmail_id) DO NOTHING`,
-      [userId, childEmail, msg.id, getHeader('From'), getHeader('Subject'), detail.data.snippet, parsedDate, !isUnread]
+      [childId, msg.id, getHeader('From'), getHeader('Subject'), detail.data.snippet, parsedDate, !isUnread]
     );
   }
 }
 
-async function syncClassroom(userId, childEmail, auth) {
+async function syncClassroom(childId, auth) {
   const classroom = google.classroom({ version: 'v1', auth });
 
   let courses = [];
@@ -1051,7 +1120,7 @@ async function syncClassroom(userId, childEmail, auth) {
     const res = await classroom.courses.list({ studentId: 'me', courseStates: ['ACTIVE'] });
     courses = res.data.courses || [];
   } catch (err) {
-    console.error(`Error obteniendo cursos para ${childEmail}:`, err.message);
+    console.error(`Error obteniendo cursos para child_id=${childId}:`, err.message);
     return;
   }
 
@@ -1087,20 +1156,20 @@ async function syncClassroom(userId, childEmail, auth) {
       }
 
       await pool.query(
-        `INSERT INTO school_assignments (user_id, child_email, classroom_id, course_name, title, description, due_date)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         ON CONFLICT (child_email, classroom_id) DO UPDATE SET
+        `INSERT INTO school_assignments (child_id, classroom_id, course_name, title, description, due_date)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (child_id, classroom_id) DO UPDATE SET
            title       = EXCLUDED.title,
            description = EXCLUDED.description,
            due_date    = EXCLUDED.due_date,
            course_name = EXCLUDED.course_name`,
-        [userId, childEmail, work.id, course.name, work.title, work.description || '', dueDate]
+        [childId, work.id, course.name, work.title, work.description || '', dueDate]
       );
     }
   }
 }
 
-async function syncClassroomAnnouncements(userId, childEmail, auth) {
+async function syncClassroomAnnouncements(childId, auth) {
   const classroom = google.classroom({ version: 'v1', auth });
   const { analyzeImage } = require('../services/aiService');
 
@@ -1109,7 +1178,7 @@ async function syncClassroomAnnouncements(userId, childEmail, auth) {
     const res = await classroom.courses.list({ studentId: 'me', courseStates: ['ACTIVE'] });
     courses = res.data.courses || [];
   } catch (err) {
-    console.error(`Error obteniendo cursos para anuncios (${childEmail}):`, err.message);
+    console.error(`Error obteniendo cursos para anuncios (child_id=${childId}):`, err.message);
     return;
   }
 
@@ -1130,7 +1199,7 @@ async function syncClassroomAnnouncements(userId, childEmail, auth) {
       } while (annPageToken);
     } catch (err) {
       if (err.code === 403) {
-        console.warn(`[school-sync] Sin permiso de anuncios para ${childEmail} — debe reconectarse para otorgar el nuevo scope.`);
+        console.warn(`[school-sync] Sin permiso de anuncios para child_id=${childId} — debe reconectarse.`);
         return;
       }
       console.error(`Error obteniendo anuncios del curso "${course.name}":`, err.message);
@@ -1143,25 +1212,20 @@ async function syncClassroomAnnouncements(userId, childEmail, auth) {
       const annDate = ann.creationTime ? new Date(ann.creationTime) : null;
       const annUpdateTime = ann.updateTime ? new Date(ann.updateTime) : annDate;
       const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-      // Use updateTime for the age check so recently-modified old announcements are not skipped
       const ageCheckDate = annUpdateTime || annDate;
       if (ageCheckDate && ageCheckDate < thirtyDaysAgo) continue;
 
-      // Check if already stored and unchanged (compare updateTime to avoid re-processing)
       const exists = await pool.query(
         'SELECT id, updated_at FROM school_emails WHERE gmail_id = $1',
         [gmailId]
       );
       if (exists.rows.length > 0 && annUpdateTime) {
         const storedAt = exists.rows[0].updated_at ? new Date(exists.rows[0].updated_at) : null;
-        // Skip only if we already have a version as recent as the announcement's updateTime
         if (storedAt && storedAt >= annUpdateTime) continue;
       }
 
-      // Build snippet from text content
       let snippet = (ann.text || '').slice(0, 500);
 
-      // Collect ALL Drive file materials (images by mimeType or by filename extension)
       const allDriveFiles = (ann.materials || [])
         .map(m => m.driveFile?.driveFile)
         .filter(f => f?.id && (
@@ -1169,7 +1233,6 @@ async function syncClassroomAnnouncements(userId, childEmail, auth) {
           /\.(jpe?g|png|gif|webp|bmp|svg)$/i.test(f.title || '')
         ));
 
-      // Also collect non-image attachments (links, YouTube, forms, etc.) for display
       const otherMaterials = (ann.materials || []).flatMap(m => {
         if (m.link) return [{ type: 'link', title: m.link.title || m.link.url, url: m.link.url }];
         if (m.youtubeVideo) return [{ type: 'youtube', title: m.youtubeVideo.title, url: `https://youtu.be/${m.youtubeVideo.id}` }];
@@ -1181,7 +1244,6 @@ async function syncClassroomAnnouncements(userId, childEmail, auth) {
         return [];
       });
 
-      // Build attachments array with thumbnail URLs for images
       const attachments = [];
       let accessToken = null;
 
@@ -1203,13 +1265,10 @@ async function syncClassroomAnnouncements(userId, childEmail, auth) {
             mimeType: file.mimeType || 'image/jpeg',
           });
 
-          // Also describe with vision AI for searchability in snippet
           if (accessToken) {
             try {
               const description = await analyzeImage(file.id, accessToken);
-              if (description) {
-                snippet += `\n[Imagen adjunta: ${description}]`;
-              }
+              if (description) snippet += `\n[Imagen adjunta: ${description}]`;
             } catch (err) {
               console.error('Error analizando imagen de anuncio:', err.message);
             }
@@ -1217,14 +1276,13 @@ async function syncClassroomAnnouncements(userId, childEmail, auth) {
         }
       }
 
-      // Add non-image materials to attachments too
       for (const m of otherMaterials) attachments.push(m);
 
       const subject = `${course.name}: ${(ann.text || '').slice(0, 60).replace(/\n/g, ' ')}…`;
 
       await pool.query(
-        `INSERT INTO school_emails (user_id, child_email, gmail_id, from_address, subject, snippet, body, date, is_read, updated_at, attachments)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), $10)
+        `INSERT INTO school_emails (child_id, gmail_id, from_address, subject, snippet, body, date, is_read, updated_at, attachments)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), $9)
          ON CONFLICT (gmail_id) DO UPDATE SET
            from_address = EXCLUDED.from_address,
            subject      = EXCLUDED.subject,
@@ -1233,38 +1291,39 @@ async function syncClassroomAnnouncements(userId, childEmail, auth) {
            date         = EXCLUDED.date,
            attachments  = EXCLUDED.attachments,
            updated_at   = NOW()`,
-        [userId, childEmail, gmailId, 'Classroom', subject, snippet, ann.text || null, annDate, false, JSON.stringify(attachments)]
+        [childId, gmailId, 'Classroom', subject, snippet, ann.text || null, annDate, false, JSON.stringify(attachments)]
       );
     }
   }
 }
 
-async function syncChild(userId, childEmail, onStep = null, childName = null) {
-  const label = childName || childEmail.split('@')[0];
+async function syncChild(childId, onStep = null, childName = null) {
+  const child = await getChildById(childId);
+  if (!child) {
+    console.error(`syncChild: child_id=${childId} no existe`);
+    return;
+  }
+  const label = childName || child.name || child.email.split('@')[0];
   const step = (text) => { if (onStep) onStep(text); };
   try {
     step(`${label}: autenticando…`);
-    const auth = await getAuthClientForChild(userId, childEmail);
+    const auth = await getAuthClient(childId);
     step(`${label}: descargando correos…`);
-    await syncGmail(userId, childEmail, auth);
+    await syncGmail(childId, auth);
     step(`${label}: descargando tareas…`);
-    await syncClassroom(userId, childEmail, auth);
+    await syncClassroom(childId, auth);
     step(`${label}: descargando anuncios…`);
-    await syncClassroomAnnouncements(userId, childEmail, auth);
+    await syncClassroomAnnouncements(childId, auth);
     step(`${label}: procesando con IA…`);
-    // Process unread emails with AI after sync
-    await processUnreadEmails(userId).catch(err =>
+    await processUnreadEmails([childId], null).catch(err =>
       console.error('Error processing emails with AI:', err.message)
     );
-    await pool.query(
-      'UPDATE google_tokens SET last_sync = NOW() WHERE user_id = $1 AND child_email = $2',
-      [userId, childEmail]
-    );
-    console.log(`✓ Sync completado para ${childEmail}`);
+    await pool.query('UPDATE google_tokens SET last_sync = NOW() WHERE child_id = $1', [childId]);
+    console.log(`✓ Sync completado para ${child.email}`);
   } catch (err) {
-    console.error(`Error sincronizando ${childEmail}:`, err.message);
+    console.error(`Error sincronizando ${child.email}:`, err.message);
     if (isTokenRevokedError(err)) {
-      await markTokenInvalid(userId, childEmail);
+      await markTokenInvalid(childId);
       if (onStep) step(`${label}: token revocado — reconectar cuenta`);
     } else {
       if (onStep) step(`${label}: error — ${err.message}`);
@@ -1275,10 +1334,12 @@ async function syncChild(userId, childEmail, onStep = null, childName = null) {
 async function syncAllChildren() {
   try {
     const result = await pool.query(
-      'SELECT DISTINCT user_id, child_email FROM google_tokens'
+      `SELECT c.id FROM children c
+         JOIN google_tokens gt ON gt.child_id = c.id
+        WHERE gt.token_valid = TRUE`
     );
     for (const row of result.rows) {
-      await syncChild(row.user_id, row.child_email);
+      await syncChild(row.id);
     }
   } catch (err) {
     console.error('Error en syncAllChildren:', err.message);

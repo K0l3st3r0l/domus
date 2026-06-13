@@ -445,16 +445,26 @@ export default function SchoolSyncPage() {
     setSelectedIds(new Set());
   }, [connected.length, activeFilter, fetchData]);
 
-  const handleConnect = async (child) => {
+  const handleConnect = async (child, force = false) => {
     setConnecting(child.email);
     try {
-      const res = await apiClient.get('/school-sync/auth-url', {
-        params: { child_email: child.email, child_name: child.name },
-      });
+      const params = { child_email: child.email, child_name: child.name };
+      if (force) params.force = 1;
+      const res = await apiClient.get('/school-sync/auth-url', { params });
       window.location.href = res.data.url;
-    } catch {
-      toast.error('Error generando URL de autorización');
+    } catch (err) {
       setConnecting(null);
+      if (err.response?.status === 409) {
+        const data = err.response.data || {};
+        const who = data.connected_by_name || data.connected_by_email || 'otro miembro';
+        const when = data.connected_at ? new Date(data.connected_at).toLocaleDateString('es-CL') : '';
+        const msg = `Ya hay una conexión activa para ${child.name}, hecha por ${who}${when ? ' el ' + when : ''}.\n\nNo es necesario reconectar. ¿Quieres hacerlo de todas formas?`;
+        if (window.confirm(msg)) {
+          await handleConnect(child, true);
+        }
+        return;
+      }
+      toast.error('Error generando URL de autorización');
     }
   };
 
@@ -830,7 +840,9 @@ export default function SchoolSyncPage() {
                         variant={tokenInvalid ? 'danger' : 'success'}
                         disabled={!!connecting}
                         onClick={() => handleConnect(child)}
-                        title={tokenInvalid ? 'Token expirado — hacer clic para reconectar' : 'Reconectar para actualizar permisos'}
+                        title={tokenInvalid
+                          ? 'Token revocado — reconectar cuenta'
+                          : `Conectado por ${info?.connected_by_name || info?.connected_by_email || '?'}${info?.connected_at ? ' el ' + new Date(info.connected_at).toLocaleDateString('es-CL') : ''}`}
                         style={{ fontSize: '0.75rem', padding: '0.15rem 0.5rem' }}
                       >
                         {isConnecting
