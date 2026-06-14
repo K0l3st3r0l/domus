@@ -121,7 +121,7 @@ router.post('/', authenticate, async (req, res) => {
 
 // Importar múltiples transacciones (estado de cuenta)
 router.post('/batch', authenticate, async (req, res) => {
-  const { transactions } = req.body;
+  const { transactions, source } = req.body;
   if (!Array.isArray(transactions) || transactions.length === 0) {
     return res.status(400).json({ error: 'No hay transacciones para importar' });
   }
@@ -142,6 +142,8 @@ router.post('/batch', authenticate, async (req, res) => {
     }
   }
 
+  const paymentMethod = source || null;
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -157,9 +159,9 @@ router.post('/batch', authenticate, async (req, res) => {
       }
 
       await client.query(
-        `INSERT INTO finance_transactions (type, amount, category, description, date, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [type, amount, category, description || null, date || new Date(), req.user.id]
+        `INSERT INTO finance_transactions (type, amount, category, description, date, created_by, payment_method)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [type, amount, category, description || null, date || new Date(), req.user.id, paymentMethod]
       );
       count++;
     }
@@ -462,6 +464,47 @@ Si no hay alertas reales, usa alertas:[]. La puntuación es del 1 al 10 (10=exce
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Error analizando finanzas' });
+  }
+});
+
+// Conteo de compras Lider BCI en el período de facturación actual
+router.get('/lider-purchases/current-period', authenticate, async (req, res) => {
+  const billingDay = parseInt(req.query.billing_day) || 26;
+  const now = new Date();
+  const today = now.getDate();
+
+  let periodStart, periodEnd;
+  if (today < billingDay) {
+    // El período arrancó en billing_day del mes pasado
+    const startDate = new Date(now.getFullYear(), now.getMonth() - 1, billingDay);
+    const endDate   = new Date(now.getFullYear(), now.getMonth(), billingDay - 1);
+    periodStart = startDate.toISOString().split('T')[0];
+    periodEnd   = endDate.toISOString().split('T')[0];
+  } else {
+    // El período arrancó en billing_day de este mes
+    const startDate = new Date(now.getFullYear(), now.getMonth(), billingDay);
+    const endDate   = new Date(now.getFullYear(), now.getMonth() + 1, billingDay - 1);
+    periodStart = startDate.toISOString().split('T')[0];
+    periodEnd   = endDate.toISOString().split('T')[0];
+  }
+
+  try {
+    const result = await pool.query(
+      `SELECT COUNT(*) AS count
+       FROM finance_transactions
+       WHERE payment_method = 'lider'
+         AND type = 'expense'
+         AND date >= $1
+         AND date <= $2
+         AND created_by = $3`,
+      [periodStart, periodEnd, req.user.id]
+    );
+    const count = parseInt(result.rows[0].count);
+    const target = 10;
+    res.json({ count, target, remaining: Math.max(0, target - count), period_start: periodStart, period_end: periodEnd });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error del servidor' });
   }
 });
 

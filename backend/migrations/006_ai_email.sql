@@ -10,4 +10,10 @@ ALTER TABLE school_emails ADD COLUMN IF NOT EXISTS extracted_date TIMESTAMP;
 ALTER TABLE school_emails ADD COLUMN IF NOT EXISTS ai_model VARCHAR(100);
 
 -- Index for efficient filtering during batch processing
-CREATE INDEX IF NOT EXISTS idx_school_emails_unread_unprocessed ON school_emails(user_id, is_read, ai_processed, date);
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='school_emails' AND column_name='user_id') THEN
+    CREATE INDEX IF NOT EXISTS idx_school_emails_unread_unprocessed ON school_emails(user_id, is_read, ai_processed, date);
+  ELSE
+    CREATE INDEX IF NOT EXISTS idx_school_emails_unread_unprocessed ON school_emails(child_id, is_read, ai_processed, date);
+  END IF;
+END $$;

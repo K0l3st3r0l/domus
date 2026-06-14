@@ -431,19 +431,23 @@ export default function SchoolSyncPage() {
   useEffect(() => {
     async function init() {
       setLoading(true);
-      await fetchStatus();
-      fetchSchedules(); // non-blocking, non-critical
+      // status y data en paralelo — el backend controla visibilidad por user, no necesita esperar connected
+      await Promise.all([
+        fetchStatus(),
+        fetchData(activeFilter === 'all' ? null : activeFilter),
+        fetchSchedules(),
+      ]);
       setLoading(false);
     }
     init();
-  }, [fetchStatus]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // solo al montar
 
   useEffect(() => {
-    if (connected.length > 0) {
-      fetchData(activeFilter === 'all' ? null : activeFilter);
-    }
+    // re-fetch solo cuando cambia el filtro activo (no en el mount inicial, que lo maneja init)
     setSelectedIds(new Set());
-  }, [connected.length, activeFilter, fetchData]);
+    fetchData(activeFilter === 'all' ? null : activeFilter);
+  }, [activeFilter, fetchData]);
 
   const handleConnect = async (child, force = false) => {
     setConnecting(child.email);

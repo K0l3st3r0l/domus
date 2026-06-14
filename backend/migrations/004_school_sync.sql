@@ -48,6 +48,18 @@ CREATE TABLE IF NOT EXISTS school_assignments (
   UNIQUE(child_email, classroom_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_school_emails_user ON school_emails(user_id);
-CREATE INDEX IF NOT EXISTS idx_school_assignments_user ON school_assignments(user_id);
-CREATE INDEX IF NOT EXISTS idx_google_tokens_user ON google_tokens(user_id);
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='school_emails' AND column_name='user_id') THEN
+    CREATE INDEX IF NOT EXISTS idx_school_emails_user ON school_emails(user_id);
+  END IF;
+END $$;
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='school_assignments' AND column_name='user_id') THEN
+    CREATE INDEX IF NOT EXISTS idx_school_assignments_user ON school_assignments(user_id);
+  END IF;
+END $$;
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='google_tokens' AND column_name='user_id') THEN
+    CREATE INDEX IF NOT EXISTS idx_google_tokens_user ON google_tokens(user_id);
+  END IF;
+END $$;

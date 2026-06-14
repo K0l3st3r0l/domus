@@ -203,10 +203,58 @@ function parseFalabellaStatement(text) {
   return { transactions, detectedCredits };
 }
 
+function parseLiderMovimientosWeb(text) {
+  // Formato tabulado desde "movimientos no facturados" en la web de Lider BCI
+  // Columnas: Fecha\tTienda / Descripción\tCuotas\tMonto
+  const transactions = [];
+  const lines = text.split('\n');
+
+  for (const line of lines) {
+    const parts = line.split('\t');
+    if (parts.length < 2) continue;
+
+    const dateStr = parts[0].trim();
+    if (!/^\d{2}\/\d{2}\/20\d{2}$/.test(dateStr)) continue;
+
+    const description = parts[1].trim().replace(/,$/, '');
+    if (!description) continue;
+
+    const montoRaw = parts[parts.length - 1].trim();
+    if (!montoRaw.startsWith('$')) continue;
+
+    const amount = parseInt(montoRaw.replace(/[$\.]/g, ''), 10);
+    if (!amount || amount <= 0) continue;
+
+    const [day, mon, yr] = dateStr.split('/');
+    const date = `${yr}-${mon}-${day}`;
+
+    const descLower = description.toLowerCase();
+    let category = 'Otros gastos';
+    for (const { keywords, category: cat } of CATEGORY_RULES) {
+      if (keywords.some(kw => descLower.includes(kw))) { category = cat; break; }
+    }
+
+    transactions.push({
+      _id: Math.random().toString(36).slice(2, 11),
+      selected: true,
+      type: 'expense',
+      amount,
+      category,
+      description,
+      date,
+    });
+  }
+
+  return { transactions, detectedCredits: [] };
+}
+
 function parseLiderStatement(text) {
-  // Detecta líneas con fecha DD/MM/YYYY, descripción y monto en formato Lider BCI
-  // Formato: LUGAR  DD/MM/YYYY  DESCRIPCION (T)  $ MONTO
-  // o simplemente: DD/MM/YYYY  DESCRIPCION (T)  $ MONTO
+  // Detecta si es formato tabulado de movimientos no facturados (web del banco)
+  if (text.includes('Tienda / Descripción') || /\d{2}\/\d{2}\/20\d{2}\t/.test(text)) {
+    return parseLiderMovimientosWeb(text);
+  }
+
+  // Formato PDF estado de cuenta: LUGAR  DD/MM/YYYY  DESCRIPCION (T)  $ MONTO
   const txRegex = /(\d{2}\/\d{2}\/20\d{2})\s+(.+?)\s+\(T\)\s+\$\s+([\d.]+)/;
   const transactions = [];
   const lines = text.split('\n');
@@ -217,7 +265,6 @@ function parseLiderStatement(text) {
 
     const lowerLine = trimmed.toLowerCase();
 
-    // Excluir líneas de metadatos
     if (LIDER_EXCLUDE_KEYWORDS.some(kw => lowerLine.includes(kw))) continue;
 
     const match = trimmed.match(txRegex);
@@ -225,15 +272,12 @@ function parseLiderStatement(text) {
 
     const [, dateStr, description, amountStr] = match;
 
-    // Convertir fecha DD/MM/YYYY → YYYY-MM-DD
     const [day, mon, yr] = dateStr.split('/');
     const date = `${yr}-${mon}-${day}`;
 
-    // Los puntos son separadores de miles en CLP (ej: "11.980" = 11980)
     const amount = parseInt(amountStr.replace(/\./g, ''), 10);
     if (!amount || amount <= 0) continue;
 
-    // Asignar categoría automáticamente según palabras clave
     const descLower = description.toLowerCase();
     let category = 'Otros gastos';
     for (const { keywords, category: cat } of CATEGORY_RULES) {
@@ -282,6 +326,15 @@ export default function FinancesPage() {
   const [importCredits, setImportCredits] = useState([]);
   const [selectedCategory, setSelectedCategory] = useState(null);
 
+  const [liderInfo, setLiderInfo] = useState(null);
+
+  const fetchLiderInfo = useCallback(async () => {
+    try {
+      const res = await apiClient.get('/finances/lider-purchases/current-period');
+      setLiderInfo(res.data);
+    } catch { /* silencioso — el aviso no es crítico */ }
+  }, []);
+
   const fetchData = useCallback(async () => {
     try {
       const [txRes, sumRes, catRes] = await Promise.all([
@@ -296,6 +349,7 @@ export default function FinancesPage() {
   }, [month, year]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
+  useEffect(() => { fetchLiderInfo(); }, [fetchLiderInfo]);
 
   const openNew = () => {
     setEditingTx(null);
@@ -421,10 +475,11 @@ export default function FinancesPage() {
     if (selected.length === 0) { toast.warn('Selecciona al menos una transacción'); return; }
     try {
       const payload = selected.map(({ type, amount, category, description, date }) => ({ type, amount, category, description, date }));
-      await apiClient.post('/finances/batch', { transactions: payload });
+      await apiClient.post('/finances/batch', { transactions: payload, source: importBank });
       toast.success(`${selected.length} transacciones importadas correctamente`);
       closeImport();
       fetchData();
+      fetchLiderInfo();
     } catch { toast.error('Error importando transacciones'); }
   };
 
@@ -456,6 +511,35 @@ export default function FinancesPage() {
           <Button className="btn-domus" onClick={openNew}>+ Añadir</Button>
         </div>
       </div>
+
+      {/* Aviso compras Lider BCI */}
+      {liderInfo && (
+        <div style={{
+          marginBottom: '1rem',
+          padding: '0.7rem 1rem',
+          borderRadius: 8,
+          display: 'flex',
+          alignItems: 'center',
+          gap: '0.75rem',
+          fontSize: '0.875rem',
+          ...(liderInfo.remaining === 0
+            ? { background: '#d1fae5', border: '1px solid #6ee7b7', color: '#065f46' }
+            : { background: '#fef3c7', border: '1px solid #fcd34d', color: '#92400e' }),
+        }}>
+          <span style={{ fontSize: '1.1rem', flexShrink: 0 }}>
+            {liderInfo.remaining === 0 ? '✓' : '🛒'}
+          </span>
+          <div style={{ flex: 1 }}>
+            {liderInfo.remaining === 0
+              ? <>Llevas <strong>{liderInfo.count} compras</strong> con Lider BCI — sin gastos de administración este período.</>
+              : <>Faltan <strong>{liderInfo.remaining} compra{liderInfo.remaining !== 1 ? 's' : ''}</strong> con Lider BCI para llegar a 10 y no pagar gastos de administración (llevas {liderInfo.count}).</>
+            }
+          </div>
+          <span style={{ fontSize: '0.75rem', opacity: 0.7, flexShrink: 0 }}>
+            {new Date(liderInfo.period_start + 'T12:00:00').toLocaleDateString('es-CL', { day: 'numeric', month: 'short' })} – {new Date(liderInfo.period_end + 'T12:00:00').toLocaleDateString('es-CL', { day: 'numeric', month: 'short' })}
+          </span>
+        </div>
+      )}
 
       {/* Resumen */}
       {summary && (
@@ -651,8 +735,9 @@ export default function FinancesPage() {
                   </>
                 ) : (
                   <>
-                    Abre el PDF del estado de cuenta en tu visor (Chrome, Adobe, etc.), selecciona todo el texto con{' '}
-                    <kbd>Ctrl+A</kbd>, cópialo con <kbd>Ctrl+C</kbd> y pégalo aquí abajo.
+                    Puedes pegar el texto de <strong>dos formas</strong>:<br />
+                    <strong>· PDF:</strong> Abre el PDF en Chrome o Adobe, selecciona todo con <kbd>Ctrl+A</kbd> y pega aquí.<br />
+                    <strong>· Web Lider:</strong> En la sección "Movimientos no facturados", selecciona la tabla y pégala directamente.
                   </>
                 )}
               </p>

@@ -5,7 +5,7 @@ const AI_API_URL = process.env.AI_API_URL || 'https://opencode.ai/zen/go';
 const AI_API_KEY = process.env.AI_API_KEY;
 const AI_MODEL = process.env.AI_MODEL || 'deepseek-v4-pro';
 const AI_VISION_MODEL = process.env.AI_VISION_MODEL;
-const MAX_TOKENS = 8000;
+const MAX_TOKENS = 16000;
 
 const TOKEN_LOG_PATH = path.join('/app/logs', 'ai_tokens.jsonl');
 
@@ -65,10 +65,14 @@ function checkTokenHealth() {
 
     const avg = Math.round(tokens.reduce((a, b) => a + b, 0) / tokens.length);
     const max = Math.max(...tokens);
-    const p90 = tokens.sort((a, b) => a - b)[Math.floor(tokens.length * 0.9)];
+    const sorted = [...tokens].sort((a, b) => a - b);
+    const p90 = sorted[Math.floor(sorted.length * 0.9)];
     const hitLimitCount = recent.filter(l => l.hitLimit).length;
     const nearLimitCount = recent.filter(l => l.completionTokens && l.completionTokens / MAX_TOKENS > 0.8).length;
-    const recommended = Math.ceil(p90 * 1.3); // p90 + 30% margen
+    // Si hay emails cortados, el max observado es el límite (no el real) → recomendar MAX_TOKENS * 2
+    const recommended = hitLimitCount > 0
+      ? Math.ceil(MAX_TOKENS * 2)
+      : Math.ceil(p90 * 1.3);
     const status = hitLimitCount > 0 ? 'critical' : nearLimitCount > 2 ? 'warning' : 'ok';
 
     return {

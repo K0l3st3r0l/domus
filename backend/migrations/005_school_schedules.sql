@@ -15,5 +15,13 @@ CREATE TABLE IF NOT EXISTS school_schedules (
   UNIQUE(user_id, child_email, day_of_week, period_order)
 );
 
-CREATE INDEX IF NOT EXISTS idx_school_schedules_user ON school_schedules(user_id);
-CREATE INDEX IF NOT EXISTS idx_school_schedules_child ON school_schedules(child_email);
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='school_schedules' AND column_name='user_id') THEN
+    CREATE INDEX IF NOT EXISTS idx_school_schedules_user ON school_schedules(user_id);
+  END IF;
+END $$;
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='school_schedules' AND column_name='child_email') THEN
+    CREATE INDEX IF NOT EXISTS idx_school_schedules_child ON school_schedules(child_email);
+  END IF;
+END $$;
