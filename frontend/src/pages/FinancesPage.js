@@ -330,7 +330,7 @@ export default function FinancesPage() {
 
   const fetchLiderInfo = useCallback(async () => {
     try {
-      const res = await apiClient.get('/finances/lider-purchases/current-period');
+      const res = await apiClient.get('/finances/lider-purchases/current-period?billing_day=21');
       setLiderInfo(res.data);
     } catch { /* silencioso — el aviso no es crítico */ }
   }, []);

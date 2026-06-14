@@ -469,7 +469,7 @@ Si no hay alertas reales, usa alertas:[]. La puntuación es del 1 al 10 (10=exce
 
 // Conteo de compras Lider BCI en el período de facturación actual
 router.get('/lider-purchases/current-period', authenticate, async (req, res) => {
-  const billingDay = parseInt(req.query.billing_day) || 26;
+  const billingDay = parseInt(req.query.billing_day) || 21;
   const now = new Date();
   const today = now.getDate();
 
