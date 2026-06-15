@@ -107,30 +107,24 @@ async function processEmail(subject, snippet, emailDate, schedule) {
       ? `\nHorario semanal del alumno:\n${scheduleText}\n\nUsa este horario para resolver referencias como "siguiente clase de [materia]" o "próxima clase". Calcula la fecha real a partir de la fecha del correo.`
       : '';
 
-    const prompt = `Eres un experto analizando comunicaciones escolares en Chile. Analiza este correo y responde con JSON.
+    const prompt = `Eres un asistente para padres de un colegio chileno. Analiza este correo y responde con JSON.
 
 Asunto: ${subject}
+Fecha: ${emailDateObj.toISOString().slice(0, 10)} (${emailDayName})
 Contenido: ${snippet}
-Fecha del correo: ${emailDateObj.toISOString().slice(0, 10)} (${emailDayName})
 ${scheduleSection}
 
-Responde SOLO con JSON válido, sin markdown, sin explicaciones, sin texto adicional:
-{"eventDate":"ISO-datetime o null","type":"reunion|tarea|aviso|otro","summary":"1-2 oraciones para padres"}
-
-REGLAS para eventDate:
-- Si dicen "próximo martes/viernes/etc", calcula la fecha real desde la fecha del correo
-- Si dicen "siguiente clase de [materia]", busca ese día en el horario y calcula la próxima fecha
-- Si dan fecha específica como "28 de abril", úsala
-- Si mencionan hora (ej: "9:40"), inclúyela: 2026-04-28T09:40:00
-- Si no hay fecha de evento, pon null
-
-REGLAS para type:
-- "reunion": asistencia de padres/apoderados (entrevistas, asambleas, PAEC)
-- "tarea": prueba, control, evaluación, entrega de trabajo
-- "aviso": circular, información general sin acción requerida
+Tipos:
+- "evaluacion": prueba, control, evaluación, disertación — el alumno debe estudiar o prepararse
+- "tarea": entrega de trabajo, investigación, traer materiales a una clase específica
+- "reunion": asistencia presencial de padres/apoderados (entrevistas, asambleas, citaciones, PAEC)
+- "aviso": información, felicitaciones, logros, comunicados, recordatorios sin acción requerida
 - "otro": no encaja
 
-REGLAS para summary: QUÉ es + CUÁNDO (si aplica) + QUÉ hacer. Ej: "Prueba de Historia el lunes 27 de abril. Estudiar para la evaluación."`;
+Para eventDate: usa la fecha exacta si la mencionan; si es relativa calcúlala desde la fecha del correo; null si no hay. Formato: YYYY-MM-DDTHH:mm:ss (hora local Chile).
+
+Responde SOLO con JSON válido:
+{"eventDate":"YYYY-MM-DDTHH:mm:ss o null","type":"evaluacion|tarea|reunion|aviso|otro","summary":"1-2 oraciones para el apoderado"}`;
 
     const response = await fetch(`${OLLAMA_API_URL}/v1/chat/completions`, {
       method: 'POST',

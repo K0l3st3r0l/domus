@@ -246,7 +246,28 @@ async function callAI(messages, { maxTokens = MAX_TOKENS, model = AI_MODEL } = {
   };
 }
 
-async function processEmail(subject, snippet, emailDate, schedule) {
+async function getTrainingExamples(pool) {
+  if (!pool) return '';
+  try {
+    const { rows } = await pool.query(
+      `SELECT subject, ai_type, ai_observation
+         FROM school_emails
+        WHERE ai_feedback IS NOT NULL
+        ORDER BY updated_at DESC
+        LIMIT 20`
+    );
+    if (!rows.length) return '';
+    const lines = rows.map(r => {
+      const obs = r.ai_observation ? ` (${r.ai_observation})` : '';
+      return `- "${r.subject}" → ${r.ai_type}${obs}`;
+    }).join('\n');
+    return `\nEjemplos corregidos por el usuario (úsalos como referencia):\n${lines}\n`;
+  } catch {
+    return '';
+  }
+}
+
+async function processEmail(subject, snippet, emailDate, schedule, pool = null) {
   if (!AI_API_KEY) {
     console.warn('AI_API_KEY not configured, skipping AI processing');
     return { extractedDate: null, type: null, summary: null, model: null };
@@ -261,36 +282,26 @@ async function processEmail(subject, snippet, emailDate, schedule) {
       ? `\nHorario semanal del alumno:\n${scheduleText}\n\nUsa este horario para resolver referencias como "siguiente clase de [materia]" o "próxima clase". Calcula la fecha real a partir de la fecha del correo.`
       : '';
 
-    const prompt = `Analiza este correo escolar chileno y extrae información estructurada para los apoderados.
+    const trainingExamples = await getTrainingExamples(pool);
 
-CORREO:
+    const prompt = `Eres un asistente para padres de un colegio chileno. Analiza este correo y responde con JSON.
+
 Asunto: ${subject}
 Fecha: ${emailDateObj.toISOString().slice(0, 10)} (${emailDayName})
 Contenido: ${snippet}
 ${scheduleSection}
-
-TAREA: Razona brevemente y luego entrega el JSON final.
-
-Paso 1 — Detectar evento o acción:
-- ¿El correo exige alguna acción del alumno o apoderado? (prueba, entrega, reunión, traer algo)
-- ¿Menciona una fecha concreta, relativa ("próximo viernes") o implícita ("la siguiente clase de [materia]")?
-- Si es relativa, calcula la fecha real usando la fecha del correo y el horario si está disponible.
-
-Paso 2 — Clasificar tipo:
-- "tarea": prueba, control, evaluación, entrega, investigación, traer materiales para una clase específica
+${trainingExamples}
+Tipos:
+- "evaluacion": prueba, control, evaluación, disertación — el alumno debe estudiar o prepararse
+- "tarea": entrega de trabajo, investigación, traer materiales a una clase específica
 - "reunion": asistencia presencial de padres/apoderados (entrevistas, asambleas, citaciones, PAEC)
-- "aviso": información general sin acción requerida (comunicados, links, recordatorios sin fecha)
-- "otro": no encaja en ninguna categoría anterior
+- "aviso": información, felicitaciones, logros, comunicados, recordatorios sin acción requerida
+- "otro": no encaja
 
-Paso 3 — Resumir para el apoderado en 1-2 oraciones directas: QUÉ + CUÁNDO (si aplica) + QUÉ HACER.
+Para eventDate: usa la fecha exacta si la mencionan; si es relativa ("próximo viernes", "siguiente clase de [materia]") calcúlala desde la fecha del correo${scheduleText ? ' usando el horario' : ''}; null si no hay fecha de evento. Formato: YYYY-MM-DDTHH:mm:ss (hora local Chile, sin zona horaria).
 
-RESPONDE ÚNICAMENTE con el siguiente JSON válido, sin markdown ni texto adicional:
-{"eventDate":"YYYY-MM-DDTHH:mm:ss o null","type":"tarea|reunion|aviso|otro","summary":"resumen para el apoderado"}
-
-Notas sobre eventDate:
-- Incluir hora si se menciona (ej: 2026-05-10T09:40:00)
-- Si no hay fecha de evento, usar null (no inventar fechas)
-- Formato: fecha local de Chile sin zona horaria`;
+Responde SOLO con JSON válido:
+{"eventDate":"YYYY-MM-DDTHH:mm:ss o null","type":"evaluacion|tarea|reunion|aviso|otro","summary":"1-2 oraciones para el apoderado: qué es, cuándo, qué hacer"}`;
 
     const { content, completionTokens, finishReason } = await callAI(
       [{ role: 'user', content: prompt }],

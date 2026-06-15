@@ -16,6 +16,7 @@ import ProfilePage from './pages/ProfilePage';
 import SetupPage from './pages/SetupPage';
 import SchoolSyncPage from './pages/SchoolSyncPage';
 import SchoolSchedulePage from './pages/SchoolSchedulePage';
+import TrainingPage from './pages/TrainingPage';
 
 function PrivateRoute({ children }) {
   const { isAuthenticated } = useAuth();
@@ -45,6 +46,7 @@ function AppRoutes() {
         <Route path="profile" element={<ProfilePage />} />
         <Route path="school-sync" element={<SchoolSyncPage />} />
         <Route path="school-schedule" element={<SchoolSchedulePage />} />
+        <Route path="school-training" element={<TrainingPage />} />
       </Route>
     </Routes>
   );

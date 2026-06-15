@@ -438,6 +438,28 @@ export default function SchoolSyncPage() {
         fetchSchedules(),
       ]);
       setLoading(false);
+
+      // Retomar polling si hay un reprocesamiento en curso (ej: el usuario navegó fuera y volvió)
+      try {
+        const { data } = await apiClient.get('/school-sync/reprocess/progress');
+        if (data.running) {
+          setReprocessing(true);
+          const poll = setInterval(async () => {
+            try {
+              const { data: p } = await apiClient.get('/school-sync/reprocess/progress');
+              setReprocessProgress(p);
+              if (p.done || !p.running) {
+                clearInterval(poll);
+                setReprocessing(false);
+                if (p.done) {
+                  setReprocessResult({ processed: p.processed, eventsCreated: p.eventsCreated });
+                  fetchData();
+                }
+              }
+            } catch { clearInterval(poll); setReprocessing(false); }
+          }, 1500);
+        }
+      } catch { /* non-critical */ }
     }
     init();
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -732,6 +754,7 @@ export default function SchoolSyncPage() {
     return emails.filter(e => {
       if (typeFilter === 'reunion') return e.ai_type === 'reunion' || MEETING_RE.test(`${e.subject || ''} ${e.snippet || ''}`);
       if (typeFilter === 'tarea') return e.ai_type === 'tarea';
+      if (typeFilter === 'evaluacion') return e.ai_type === 'evaluacion';
       if (typeFilter === 'aviso') return e.ai_type === 'aviso';
       return true;
     });
@@ -1055,7 +1078,8 @@ export default function SchoolSyncPage() {
                   {[
                     { key: 'all', label: 'Todos' },
                     { key: 'reunion', label: '🗓️ Reuniones' },
-                    { key: 'tarea', label: '📝 Tareas/Pruebas' },
+                    { key: 'evaluacion', label: '📋 Evaluaciones' },
+                    { key: 'tarea', label: '📝 Tareas' },
                     { key: 'aviso', label: '📢 Avisos' },
                   ].map(f => (
                     <Button key={f.key} size="sm"
@@ -1306,9 +1330,10 @@ export default function SchoolSyncPage() {
                     <div style={{ display: 'flex', gap: '0.3rem', flexShrink: 0 }}>
                       {isMeeting && <Badge bg="warning" text="dark" style={{ fontSize: '0.62rem' }}>🗓️ Reunión</Badge>}
                       {hasMaterials && <Badge bg="info" style={{ fontSize: '0.62rem' }}>📦 Materiales</Badge>}
-                      {email.ai_type === 'reunion' && !isMeeting && <Badge bg="warning" text="dark" style={{ fontSize: '0.62rem' }}>🤖 Reunión</Badge>}
-                      {email.ai_type === 'tarea' && <Badge bg="success" style={{ fontSize: '0.62rem' }}>🤖 Tarea</Badge>}
-                      {email.ai_type === 'aviso' && <Badge bg="secondary" style={{ fontSize: '0.62rem' }}>🤖 Aviso</Badge>}
+                      {email.ai_type === 'reunion' && !isMeeting && <Badge bg="warning" text="dark" style={{ fontSize: '0.62rem' }}>🗓️ Reunión</Badge>}
+                      {email.ai_type === 'evaluacion' && <Badge bg="danger" style={{ fontSize: '0.62rem' }}>📋 Evaluación</Badge>}
+                      {email.ai_type === 'tarea' && <Badge bg="success" style={{ fontSize: '0.62rem' }}>📝 Tarea</Badge>}
+                      {email.ai_type === 'aviso' && <Badge bg="secondary" style={{ fontSize: '0.62rem' }}>📢 Aviso</Badge>}
                     </div>
                   </div>
                   <div style={{ fontSize: '0.78rem', color: 'var(--domus-muted)', marginBottom: '0.25rem' }}>
@@ -1552,7 +1577,7 @@ export default function SchoolSyncPage() {
                   )}
                   {emailModal.email.ai_type && (
                     <div style={{ marginTop: '0.3rem', fontSize: '0.75rem', color: 'var(--domus-muted)' }}>
-                      Tipo: <strong>{emailModal.email.ai_type}</strong>
+                      Tipo: <strong>{{ evaluacion: '📋 Evaluación', tarea: '📝 Tarea', reunion: '🗓️ Reunión', aviso: '📢 Aviso' }[emailModal.email.ai_type] || emailModal.email.ai_type}</strong>
                     </div>
                   )}
                 </div>

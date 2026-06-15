@@ -248,29 +248,59 @@ router.post('/check-duplicates', authenticate, async (req, res) => {
     return res.status(400).json({ error: 'No hay transacciones para verificar' });
   }
   try {
-    const keys = transactions
-      .filter(tx => tx.description && tx.date && tx.amount)
-      .map(tx => `('${tx.description.replace(/'/g, "''")}', '${tx.date}', ${tx.amount})`);
+    const filtered = transactions.filter(tx => tx.date && tx.amount);
+    if (filtered.length === 0) return res.json({ duplicates: [], count: 0 });
 
-    if (keys.length === 0) return res.json({ duplicates: [], count: 0 });
+    // Titular: matchear por (fecha, monto) porque el notifier del celular guarda la misma
+    // transacción con descripción expandida (ej: "CINE HOYTS PUERTO MONTT CHL") distinta
+    // a la del estado web CMR (ej: "COMPRA CINEPOLIS PASMAR P.MON").
+    // Adicional: matchear por (fecha, monto, descripción) porque la descripción coincide
+    // exactamente si ya fue importado desde CMR web anteriormente.
+    const titular = filtered.filter(tx => tx.persona !== 'Adicional');
+    const adicional = filtered.filter(tx => tx.persona === 'Adicional');
+
+    const conditions = [];
+    const params = [req.user.id];
+
+    for (const tx of titular) {
+      const base = params.length;
+      conditions.push(`(date = $${base + 1}::date AND amount = $${base + 2}::numeric)`);
+      params.push(tx.date, tx.amount);
+    }
+    for (const tx of adicional) {
+      const base = params.length;
+      conditions.push(`(date = $${base + 1}::date AND amount = $${base + 2}::numeric AND description = $${base + 3})`);
+      params.push(tx.date, tx.amount, tx.description);
+    }
+
+    if (conditions.length === 0) return res.json({ duplicates: [], count: 0 });
 
     const result = await pool.query(
       `SELECT description, date::text, amount::numeric
        FROM finance_transactions
        WHERE created_by = $1
-         AND (description, date, amount) IN (
-           SELECT t.description, t.date::date, t.amount::numeric
-           FROM finance_transactions t
-           WHERE t.created_by = $1
-             AND (description, date::text, amount::numeric) IN (${keys})
-         )`,
-      [req.user.id]
+         AND (${conditions.join(' OR ')})`,
+      params
     );
 
-    const dupSet = new Set(result.rows.map(r => `${r.description}|${r.date}|${parseFloat(r.amount)}`));
-    const duplicates = transactions.filter(tx =>
-      dupSet.has(`${tx.description}|${tx.date}|${parseFloat(tx.amount)}`)
-    ).map(tx => ({ description: tx.description, date: tx.date, amount: tx.amount, isDuplicate: true }));
+    // Indexar resultados de la DB: clave (fecha|monto) → descripción existente
+    const dupByDateAmount = new Map();
+    const dupByDateAmountDesc = new Set();
+    for (const r of result.rows) {
+      const key = `${r.date}|${parseFloat(r.amount)}`;
+      dupByDateAmount.set(key, r.description);
+      dupByDateAmountDesc.add(`${key}|${r.description}`);
+    }
+
+    const duplicates = filtered.filter(tx => {
+      const key = `${tx.date}|${parseFloat(tx.amount)}`;
+      if (tx.persona !== 'Adicional') return dupByDateAmount.has(key);
+      return dupByDateAmountDesc.has(`${key}|${tx.description}`);
+    }).map(tx => {
+      const key = `${tx.date}|${parseFloat(tx.amount)}`;
+      const existingDescription = dupByDateAmount.get(key) || tx.description;
+      return { description: tx.description, date: tx.date, amount: tx.amount, existingDescription, isDuplicate: true };
+    });
 
     res.json({ duplicates, count: duplicates.length });
   } catch (err) {

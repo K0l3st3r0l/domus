@@ -72,7 +72,7 @@ function parseCMRWebStatement(text) {
     // Necesitamos al menos: fecha, descripción, persona, monto
     if (parts.length < 4) continue;
 
-    const [dateStr, description, , totalAmountStr, cuotaInfo, cuotaAmountStr] = parts;
+    const [dateStr, description, persona, totalAmountStr, cuotaInfo, cuotaAmountStr] = parts;
 
     // Validar formato de fecha DD/MM/YYYY
     if (!/^\d{2}\/\d{2}\/20\d{2}$/.test(dateStr)) continue;
@@ -106,6 +106,7 @@ function parseCMRWebStatement(text) {
       category,
       description: description.trim(),
       date,
+      persona: persona || 'Titular',
     });
   }
 
@@ -409,16 +410,27 @@ export default function FinancesPage() {
         apiClient.post('/finances/categories-by-description', { descriptions }),
       ]);
 
-      const duplicateSet = new Set(checkRes.data.duplicates.map(d => `${d.description}|${d.date}|${d.amount}`));
+      // Titular: key por (fecha, monto) — el notifier guarda descripción diferente
+      // Adicional: key por (fecha, monto, descripción) — sólo duplica si importado antes desde CMR web
+      const dupMap = new Map(
+        checkRes.data.duplicates.map(d => [
+          d.persona !== 'Adicional' ? `${d.date}|${d.amount}` : `${d.date}|${d.amount}|${d.description}`,
+          d.existingDescription || d.description,
+        ])
+      );
       const learnedCategories = catRes.data; // { "COMPRA IONOS Inc.": "Servicios", ... }
 
       const txsWithFlags = transactions.map(tx => {
-        const key = `${tx.description}|${tx.date}|${tx.amount}`;
-        const isDuplicate = duplicateSet.has(key);
+        const key = tx.persona !== 'Adicional'
+          ? `${tx.date}|${tx.amount}`
+          : `${tx.date}|${tx.amount}|${tx.description}`;
+        const existingDescription = dupMap.get(key);
+        const isDuplicate = existingDescription !== undefined;
         const learnedCategory = learnedCategories[tx.description];
         return {
           ...tx,
           isDuplicate,
+          existingDescription: isDuplicate ? existingDescription : null,
           selected: isDuplicate ? false : tx.selected,
           category: learnedCategory || tx.category,
           learnedCategory: !!learnedCategory,
@@ -835,7 +847,16 @@ export default function FinancesPage() {
                         </td>
                         <td style={{ fontSize: '0.8rem', verticalAlign: 'middle' }}>
                           {tx.description}
-                          {tx.isDuplicate && <div style={{ fontSize: '0.7rem', color: '#dc2626', marginTop: '0.2rem' }}>Duplicado: ya existe en BD</div>}
+                          {tx.persona && tx.persona !== 'Titular' && (
+                            <span style={{ marginLeft: '0.4rem', fontSize: '0.7rem', color: '#6366f1', fontWeight: 500 }}>{tx.persona}</span>
+                          )}
+                          {tx.isDuplicate && (
+                            <div style={{ fontSize: '0.7rem', color: '#dc2626', marginTop: '0.2rem' }}>
+                              {tx.existingDescription && tx.existingDescription !== tx.description
+                                ? `Duplicado: ya existe como "${tx.existingDescription}"`
+                                : 'Duplicado: ya existe en BD'}
+                            </div>
+                          )}
                         </td>
                         <td style={{ verticalAlign: 'middle' }}>
                           <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem' }}>

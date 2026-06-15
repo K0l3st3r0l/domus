@@ -670,6 +670,72 @@ router.post('/reprocess', authenticate, (req, res) => {
   })();
 });
 
+// ─── AI Training / Feedback ──────────────────────────────────────────────────
+
+router.get('/training/queue', authenticate, async (req, res) => {
+  try {
+    const visibleIds = await getVisibleChildIds(req.user);
+    const { rows } = await pool.query(
+      `SELECT se.id, se.gmail_id, se.subject, se.snippet, se.from_address, se.date,
+              se.ai_summary, se.ai_type, se.extracted_date, se.ai_model,
+              se.ai_feedback, se.ai_observation, se.ai_original_type,
+              c.name AS child_name
+         FROM school_emails se
+         JOIN children c ON c.id = se.child_id
+        WHERE se.child_id = ANY($1::int[])
+          AND se.ai_processed = true
+          AND se.ai_feedback IS NULL
+        ORDER BY se.date DESC`,
+      [visibleIds]
+    );
+    const { rows: stats } = await pool.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE ai_processed = true) AS total,
+         COUNT(*) FILTER (WHERE ai_processed = true AND ai_feedback IS NOT NULL) AS reviewed
+         FROM school_emails WHERE child_id = ANY($1::int[])`,
+      [visibleIds]
+    );
+    res.json({ queue: rows, stats: stats[0] });
+  } catch (err) {
+    console.error('Error loading training queue:', err.message);
+    res.status(500).json({ error: 'Error cargando cola de entrenamiento' });
+  }
+});
+
+router.patch('/emails/:gmailId/feedback', authenticate, async (req, res) => {
+  try {
+    const { gmailId } = req.params;
+    const { feedback, correctedType, observation } = req.body;
+    if (!['approved', 'corrected'].includes(feedback)) {
+      return res.status(400).json({ error: 'feedback debe ser "approved" o "corrected"' });
+    }
+    const visibleIds = await getVisibleChildIds(req.user);
+    const { rows } = await pool.query(
+      'SELECT id, ai_type FROM school_emails WHERE gmail_id = $1 AND child_id = ANY($2::int[])',
+      [gmailId, visibleIds]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Email no encontrado' });
+
+    const current = rows[0];
+    const newType = feedback === 'corrected' && correctedType ? correctedType : current.ai_type;
+    const originalType = feedback === 'corrected' ? current.ai_type : null;
+
+    await pool.query(
+      `UPDATE school_emails SET
+         ai_feedback = $1,
+         ai_type = $2,
+         ai_original_type = COALESCE(ai_original_type, $3),
+         ai_observation = $4
+       WHERE gmail_id = $5`,
+      [feedback, newType, originalType, observation || null, gmailId]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Error saving feedback:', err.message);
+    res.status(500).json({ error: 'Error guardando feedback' });
+  }
+});
+
 // ─── Email body parsing helpers ──────────────────────────────────────────────
 
 function decodeBase64Url(data) {
@@ -909,7 +975,7 @@ async function processUnreadEmails(visibleChildIds, userId) {
           }
           const schedule = scheduleCache[email.child_id];
           const content = await fetchBodyIfMissing(email.child_id, email);
-          const { extractedDate, type, summary, model } = await processEmail(email.subject, content, email.date, schedule);
+          const { extractedDate, type, summary, model } = await processEmail(email.subject, content, email.date, schedule, pool);
 
           await pool.query(
             `UPDATE school_emails
@@ -1001,7 +1067,7 @@ async function reprocessEmailsByRange(visibleChildIds, userId, dateFrom, dateTo,
         }
         const schedule = scheduleCache[email.child_id];
         const content = await fetchBodyIfMissing(email.child_id, email);
-        const { extractedDate, type, summary, model } = await processEmail(email.subject, content, email.date, schedule);
+        const { extractedDate, type, summary, model } = await processEmail(email.subject, content, email.date, schedule, pool);
 
         await pool.query(
           `UPDATE school_emails
@@ -1068,7 +1134,6 @@ async function syncGmail(childId, auth) {
 
   const queries = [
     { q: 'from:cicpm.cl newer_than:60d', includeSpamTrash: false },
-    { q: 'from:classroom.google.com newer_than:60d', includeSpamTrash: false },
     { q: 'from:mhrehbein@gmail.com newer_than:60d', includeSpamTrash: true },
     { q: 'mhrehbein@gmail.com newer_than:60d', includeSpamTrash: true },
   ];
@@ -1136,6 +1201,16 @@ async function syncClassroom(childId, auth) {
     return;
   }
 
+  const currentYear = new Date().getFullYear();
+  const yearRe = /20(\d{2})/g;
+  courses = courses.filter(course => {
+    const years = [...course.name.matchAll(yearRe)].map(m => parseInt(m[0], 10));
+    if (years.length > 0) return years.some(y => y === currentYear);
+    // Sin año en el nombre: excluir si el curso no tuvo actividad este año
+    const lastUpdate = course.updateTime ? new Date(course.updateTime) : null;
+    return lastUpdate ? lastUpdate.getFullYear() >= currentYear : true;
+  });
+
   for (const course of courses) {
     let works = [];
     try {
@@ -1193,6 +1268,15 @@ async function syncClassroomAnnouncements(childId, auth) {
     console.error(`Error obteniendo cursos para anuncios (child_id=${childId}):`, err.message);
     return;
   }
+
+  const currentYear = new Date().getFullYear();
+  const yearRe = /20(\d{2})/g;
+  courses = courses.filter(course => {
+    const years = [...course.name.matchAll(yearRe)].map(m => parseInt(m[0], 10));
+    if (years.length > 0) return years.some(y => y === currentYear);
+    const lastUpdate = course.updateTime ? new Date(course.updateTime) : null;
+    return lastUpdate ? lastUpdate.getFullYear() >= currentYear : true;
+  });
 
   for (const course of courses) {
     let announcements = [];

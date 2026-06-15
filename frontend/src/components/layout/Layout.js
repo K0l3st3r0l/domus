@@ -12,6 +12,7 @@ const NAV_ITEMS = [
   { to: '/finances', icon: '💰', label: 'Finanzas' },
   { to: '/school-sync', icon: '🎓', label: 'School Sync' },
   { to: '/school-schedule', icon: '📚', label: 'Horario' },
+  { to: '/school-training', icon: '🧠', label: 'Entrenar IA' },
   { to: '/family', icon: '👨‍👩‍👧‍👦', label: 'Familia' },
 ];
 
