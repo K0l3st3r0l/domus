@@ -276,13 +276,30 @@ router.get('/assignments', authenticate, async (req, res) => {
       filterIds = [c.id];
     }
 
+    // Filtra por año vigente. Prioriza update_time de Classroom (fuente de verdad);
+    // si está NULL (registros pre-migración 017) usa el año del course_name o de la due_date.
+    // Registros sin update_time, sin año en el course_name y sin due_date se excluyen
+    // porque no se puede determinar su año con certeza (created_at se renueva en re-syncs).
     const result = await pool.query(
       `SELECT sa.*, c.email AS child_email, c.name AS child_name
          FROM school_assignments sa
          JOIN children c ON c.id = sa.child_id
         WHERE sa.child_id = ANY($1::int[])
+          AND (
+            sa.update_time IS NOT NULL AND sa.update_time >= $2
+            OR sa.update_time IS NULL AND (
+              sa.course_name ~ '(20[0-9]{2})'
+              AND EXISTS (
+                SELECT 1 FROM regexp_matches(sa.course_name, '(20[0-9]{2})', 'g') AS m
+                HAVING bool_or(m[1]::int = $3)
+              )
+            )
+            OR sa.update_time IS NULL
+               AND sa.due_date IS NOT NULL
+               AND EXTRACT(YEAR FROM sa.due_date)::int >= $3
+          )
         ORDER BY sa.due_date ASC NULLS LAST`,
-      [filterIds]
+      [filterIds, `${new Date().getFullYear()}-01-01 00:00:00`, new Date().getFullYear()]
     );
     res.json(result.rows);
   } catch (err) {
@@ -1242,15 +1259,20 @@ async function syncClassroom(childId, auth) {
         );
       }
 
+      const creationTime = work.creationTime ? new Date(work.creationTime) : null;
+      const updateTime   = work.updateTime   ? new Date(work.updateTime)   : null;
+
       await pool.query(
-        `INSERT INTO school_assignments (child_id, classroom_id, course_name, title, description, due_date)
-         VALUES ($1, $2, $3, $4, $5, $6)
+        `INSERT INTO school_assignments (child_id, classroom_id, course_name, title, description, due_date, creation_time, update_time)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          ON CONFLICT (child_id, classroom_id) DO UPDATE SET
-           title       = EXCLUDED.title,
-           description = EXCLUDED.description,
-           due_date    = EXCLUDED.due_date,
-           course_name = EXCLUDED.course_name`,
-        [childId, work.id, course.name, work.title, work.description || '', dueDate]
+           title         = EXCLUDED.title,
+           description   = EXCLUDED.description,
+           due_date      = EXCLUDED.due_date,
+           course_name   = EXCLUDED.course_name,
+           creation_time = EXCLUDED.creation_time,
+           update_time   = EXCLUDED.update_time`,
+        [childId, work.id, course.name, work.title, work.description || '', dueDate, creationTime, updateTime]
       );
     }
   }
