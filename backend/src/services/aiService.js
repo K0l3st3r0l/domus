@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { chileNaiveStringToUTC } = require('../utils/chileTime');
 
 const AI_API_URL = process.env.AI_API_URL || 'https://opencode.ai/zen/go';
 const AI_API_KEY = process.env.AI_API_KEY;
@@ -333,14 +334,22 @@ Responde SOLO con JSON válido:
     let extractedDate = null;
     if (parsed.eventDate) {
       const raw = String(parsed.eventDate).trim();
-      const d = new Date(raw);
-      // Shift date-only strings to noon UTC so the event lands on the correct
-      // local day in Chile (UTC-3/UTC-4).
+      // Date-only strings have no real time to preserve — anchor them at
+      // noon UTC so the event lands on the correct local day in Chile
+      // (UTC-3/UTC-4) regardless of the server's own timezone.
       const hasNoTime = !raw.includes('T') || /T00:00(:00)?(Z|[+-]00:00)?$/.test(raw);
       if (hasNoTime) {
+        const d = new Date(raw);
         d.setUTCHours(12, 0, 0, 0);
+        extractedDate = d;
+      } else {
+        // raw has an explicit time and the prompt asks for "hora local
+        // Chile" but no offset. `new Date(raw)` would parse it as the
+        // server's local time (UTC in Docker), silently dropping the
+        // Chile offset. Convert it explicitly via the America/Santiago
+        // timezone instead.
+        extractedDate = chileNaiveStringToUTC(raw);
       }
-      extractedDate = d;
     }
 
     return { extractedDate, type: parsed.type || 'otro', summary: parsed.summary || null, model: AI_MODEL };

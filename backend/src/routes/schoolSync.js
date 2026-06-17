@@ -4,6 +4,7 @@ const { google } = require('googleapis');
 const jwt = require('jsonwebtoken');
 const pool = require('../models/db');
 const { authenticate } = require('../middleware/auth');
+const { chileNaiveToUTC, chileDateParts } = require('../utils/chileTime');
 const { processEmail, getTokenStats, checkTokenHealth } = require('../services/aiService');
 
 const SCOPES = [
@@ -171,7 +172,7 @@ router.get('/callback', async (req, res) => {
       ]
     );
 
-    syncChild(childId).catch(err =>
+    syncChild(childId, null, null, userId).catch(err =>
       console.error('Error en sync inicial:', err.message)
     );
 
@@ -213,7 +214,7 @@ router.post('/sync', authenticate, async (req, res) => {
     };
 
     for (const row of children) {
-      await syncChild(row.id, step, row.name).catch(err =>
+      await syncChild(row.id, step, row.name, userId).catch(err =>
         console.error(`Error en sync manual (${row.email}):`, err.message)
       );
     }
@@ -524,13 +525,18 @@ router.post('/sync-email-to-calendar', authenticate, async (req, res) => {
        VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
       [`🗓️ ${email.subject}`, email.ai_summary || email.snippet || 'Reunión detectada', timing.startTime, timing.endTime, timing.allDay, '#f59e0b', req.user.id]
     );
+    const newEventId = eventResult.rows[0].id;
 
-    await pool.query(
-      'UPDATE school_emails SET synced_to_calendar = true, calendar_event_id = $1 WHERE id = $2',
-      [eventResult.rows[0].id, emailId]
+    const claim = await pool.query(
+      'UPDATE school_emails SET synced_to_calendar = true, calendar_event_id = $1 WHERE id = $2 AND calendar_event_id IS NULL RETURNING id',
+      [newEventId, emailId]
     );
+    if (claim.rows.length === 0) {
+      await pool.query('DELETE FROM calendar_events WHERE id = $1', [newEventId]);
+      return res.status(400).json({ error: 'Este correo ya fue agregado al calendario' });
+    }
 
-    res.json({ success: true, eventId: eventResult.rows[0].id });
+    res.json({ success: true, eventId: newEventId });
   } catch (err) {
     console.error('Error syncing email to calendar:', err);
     res.status(500).json({ error: 'Error al agregar reunión al calendario' });
@@ -947,22 +953,54 @@ function inferCalendarTimingFromSchedule({ subject, summary, extractedDate, sche
     return { startTime: extractedDate, endTime: null, allDay: true };
   }
 
+  // Schedule times are Chile wall-clock hours (e.g. "13:40" = 1:40pm at
+  // school), not UTC — convert them through the same Chile-aware helper
+  // used for AI-extracted times so the stored instant matches reality.
+  const { year, month, day } = chileDateParts(extractedDate);
   const [startHour, startMinute] = matchingSlot.start_time.substring(0, 5).split(':').map(Number);
-  const startTime = new Date(extractedDate);
-  startTime.setHours(startHour, startMinute, 0, 0);
+  const startTime = chileNaiveToUTC(year, month, day, startHour, startMinute);
 
-  const endTime = new Date(startTime);
+  let endTime;
   if (matchingSlot.end_time) {
     const [endHour, endMinute] = matchingSlot.end_time.substring(0, 5).split(':').map(Number);
-    endTime.setHours(endHour, endMinute, 0, 0);
+    endTime = chileNaiveToUTC(year, month, day, endHour, endMinute);
   } else {
-    endTime.setMinutes(endTime.getMinutes() + 45);
+    endTime = new Date(startTime.getTime() + 45 * 60000);
   }
 
   return { startTime, endTime, allDay: false };
 }
 
 const PROCESS_BATCH_SIZE = 10;
+
+// Email types that warrant an auto-created calendar event. 'aviso' and
+// 'otro' are informational and shouldn't clutter the calendar.
+const CALENDAR_EVENT_TYPES = ['evaluacion', 'tarea', 'reunion'];
+
+// Inserts a calendar event and atomically claims it for `emailId` via a
+// conditional UPDATE. If another concurrent run already linked this email
+// to a different event (e.g. two overlapping reprocess passes), the just
+// inserted row is rolled back instead of leaving an orphaned duplicate.
+async function createCalendarEventForEmail({ emailId, title, description, timing, userId }) {
+  const insertResult = await pool.query(
+    `INSERT INTO calendar_events (title, description, start_time, end_time, all_day, color, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+    [title, description, timing.startTime, timing.endTime, timing.allDay, '#f59e0b', userId]
+  );
+  const newEventId = insertResult.rows[0].id;
+
+  const claim = await pool.query(
+    `UPDATE school_emails SET calendar_event_id = $1 WHERE id = $2 AND calendar_event_id IS NULL RETURNING id`,
+    [newEventId, emailId]
+  );
+
+  if (claim.rows.length === 0) {
+    await pool.query('DELETE FROM calendar_events WHERE id = $1', [newEventId]);
+    return null;
+  }
+
+  return newEventId;
+}
 
 async function processUnreadEmails(visibleChildIds, userId) {
   let processedCount = 0;
@@ -1002,7 +1040,7 @@ async function processUnreadEmails(visibleChildIds, userId) {
           );
           processedCount++;
 
-          if (extractedDate && extractedDate >= new Date() && (type === 'tarea' || type === 'reunion')) {
+          if (extractedDate && extractedDate >= new Date() && CALENDAR_EVENT_TYPES.includes(type)) {
             try {
               const existingForEmail = await pool.query(
                 `SELECT calendar_event_id FROM school_emails WHERE id = $1 AND calendar_event_id IS NOT NULL`,
@@ -1023,16 +1061,14 @@ async function processUnreadEmails(visibleChildIds, userId) {
                 const timing = inferCalendarTimingFromSchedule({
                   subject: email.subject, summary, extractedDate, schedule,
                 });
-                const insertResult = await pool.query(
-                  `INSERT INTO calendar_events (title, description, start_time, end_time, all_day, color, created_by)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-                  [`🗓️ ${email.subject}`, summary || 'Evento detectado por IA', timing.startTime, timing.endTime, timing.allDay, '#f59e0b', userId]
-                );
-                await pool.query(
-                  `UPDATE school_emails SET calendar_event_id = $1 WHERE id = $2`,
-                  [insertResult.rows[0].id, email.id]
-                );
-                eventsCreated++;
+                const newEventId = await createCalendarEventForEmail({
+                  emailId: email.id,
+                  title: `🗓️ ${email.subject}`,
+                  description: summary || 'Evento detectado por IA',
+                  timing,
+                  userId,
+                });
+                if (newEventId) eventsCreated++;
               }
             } catch (err) {
               console.error('Error creating calendar event:', err.message);
@@ -1095,7 +1131,7 @@ async function reprocessEmailsByRange(visibleChildIds, userId, dateFrom, dateTo,
         processedCount++;
         setProgress({ processed: processedCount });
 
-        if (extractedDate && extractedDate >= new Date()) {
+        if (extractedDate && extractedDate >= new Date() && CALENDAR_EVENT_TYPES.includes(type)) {
           try {
             const existingForEmail = await pool.query(
               `SELECT calendar_event_id FROM school_emails WHERE id = $1 AND calendar_event_id IS NOT NULL`,
@@ -1116,17 +1152,17 @@ async function reprocessEmailsByRange(visibleChildIds, userId, dateFrom, dateTo,
               const timing = inferCalendarTimingFromSchedule({
                 subject: email.subject, summary, extractedDate, schedule,
               });
-              const insertResult = await pool.query(
-                `INSERT INTO calendar_events (title, description, start_time, end_time, all_day, color, created_by)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-                [`🗓️ ${email.subject}`, summary || 'Evento detectado por IA', timing.startTime, timing.endTime, timing.allDay, '#f59e0b', userId]
-              );
-              await pool.query(
-                `UPDATE school_emails SET calendar_event_id = $1 WHERE id = $2`,
-                [insertResult.rows[0].id, email.id]
-              );
-              eventsCreated++;
-              setProgress({ eventsCreated });
+              const newEventId = await createCalendarEventForEmail({
+                emailId: email.id,
+                title: `🗓️ ${email.subject}`,
+                description: summary || 'Evento detectado por IA',
+                timing,
+                userId,
+              });
+              if (newEventId) {
+                eventsCreated++;
+                setProgress({ eventsCreated });
+              }
             }
           } catch (err) {
             console.error('Error creating calendar event:', err.message);
@@ -1415,7 +1451,7 @@ async function syncClassroomAnnouncements(childId, auth) {
   }
 }
 
-async function syncChild(childId, onStep = null, childName = null) {
+async function syncChild(childId, onStep = null, childName = null, userId = null) {
   const child = await getChildById(childId);
   if (!child) {
     console.error(`syncChild: child_id=${childId} no existe`);
@@ -1433,7 +1469,14 @@ async function syncChild(childId, onStep = null, childName = null) {
     step(`${label}: descargando anuncios…`);
     await syncClassroomAnnouncements(childId, auth);
     step(`${label}: procesando con IA…`);
-    await processUnreadEmails([childId], null).catch(err =>
+    // Sin userId explícito (ej. cron), usar quien conectó la cuenta de Google
+    // del niño como dueño de los eventos auto-creados en el calendario.
+    let effectiveUserId = userId;
+    if (!effectiveUserId) {
+      const owner = await pool.query('SELECT connected_by_user_id FROM google_tokens WHERE child_id = $1', [childId]);
+      effectiveUserId = owner.rows[0]?.connected_by_user_id || null;
+    }
+    await processUnreadEmails([childId], effectiveUserId).catch(err =>
       console.error('Error processing emails with AI:', err.message)
     );
     await pool.query('UPDATE google_tokens SET last_sync = NOW() WHERE child_id = $1', [childId]);
