@@ -26,7 +26,7 @@ const EMPTY_FORM = {
 function daysUntil(dateStr) {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
-  const target = new Date(dateStr + 'T12:00:00');
+  const target = new Date(dateStr.slice(0, 10) + 'T12:00:00');
   target.setHours(0, 0, 0, 0);
   return Math.round((target - today) / (1000 * 60 * 60 * 24));
 }
@@ -368,14 +368,14 @@ export default function SubscriptionsPage() {
                   <div style={{ textAlign: 'right' }}>
                     {paid && paidDate(sub) ? (
                       <span style={{ fontSize: '0.78rem', color: '#10b981' }}>
-                        Pagada {new Date(paidDate(sub) + 'T12:00:00').toLocaleDateString('es-CL', { day: 'numeric', month: 'short' })}
+                        Pagada {new Date(paidDate(sub).slice(0, 10) + 'T12:00:00').toLocaleDateString('es-CL', { day: 'numeric', month: 'short' })}
                         {sub.auto_matched_tx && !sub.last_paid_at && (
                           <span style={{ color: '#94a3b8' }}> · auto</span>
                         )}
                       </span>
                     ) : (
                       <span style={{ fontSize: '0.78rem', color: '#94a3b8' }}>
-                        Renueva: {new Date(sub.next_billing_date + 'T12:00:00').toLocaleDateString('es-ES')}
+                        Renueva: {new Date(sub.next_billing_date.slice(0, 10) + 'T12:00:00').toLocaleDateString('es-ES')}
                       </span>
                     )}
                   </div>

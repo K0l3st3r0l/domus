@@ -341,7 +341,7 @@ function CreditCard({ credit, onEdit, onPay }) {
   // Calcular meses restantes para la fecha estimada de fin
   const endLabel = (() => {
     if (credit.end_date) {
-      return new Date(credit.end_date + 'T12:00:00').toLocaleDateString('es-CL', { month: 'short', year: 'numeric' });
+      return new Date(credit.end_date.slice(0, 10) + 'T12:00:00').toLocaleDateString('es-CL', { month: 'short', year: 'numeric' });
     }
     if (remaining !== null) {
       const d = new Date();
