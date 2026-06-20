@@ -40,10 +40,16 @@ router.get('/', authenticate, async (req, res) => {
       else if (sub.billing_cycle === 'yearly') cycleStart.setFullYear(cycleStart.getFullYear() - 1);
       else if (sub.billing_cycle === 'weekly') cycleStart.setDate(cycleStart.getDate() - 7);
 
-      // Buscar transacción que coincida en el período y descripción
+      // Buscar transacción que coincida en el período, descripción y monto.
+      // El monto es necesario porque varias suscripciones del mismo proveedor (ej:
+      // Amazon Music y Prime Video, ambas con "amazon" como keyword) no deben
+      // cruzarse entre sí solo por compartir palabra clave.
+      const subAmount = parseFloat(sub.amount);
+      const amountTolerance = Math.max(500, subAmount * 0.1);
       const match = txRes.rows.find(tx => {
         const txDate = new Date(tx.date);
         if (txDate < cycleStart) return false;
+        if (Math.abs(parseFloat(tx.amount) - subAmount) > amountTolerance) return false;
         const desc = (tx.description || '').toLowerCase();
         return [...keywords].some(k => desc.includes(k));
       });

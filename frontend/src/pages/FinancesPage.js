@@ -636,7 +636,7 @@ export default function FinancesPage() {
               <div style={{ fontWeight: 600, color: tx.type === 'income' ? '#10b981' : '#ef4444' }}>
                 {tx.type === 'income' ? '+' : '-'}{parseFloat(tx.amount).toFixed(0)} CLP
               </div>
-              <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>{new Date(tx.date).toLocaleDateString('es-ES')}</div>
+              <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>{new Date(tx.date + 'T12:00:00').toLocaleDateString('es-ES')}</div>
             </div>
           </div>
         ))}
