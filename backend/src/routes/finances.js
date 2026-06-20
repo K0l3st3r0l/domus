@@ -6,6 +6,32 @@ const { callAI } = require('../services/aiService');
 
 const MONTHS_ES = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
 
+// El estado de cuenta CMR web fecha la compra el día que el banco la procesa,
+// mientras que Domus Notifier captura la fecha exacta de la compra. Pueden
+// diferir varios días, por eso el match de duplicados de Titular tolera un
+// rango de fechas en vez de exigir igualdad exacta.
+const DUP_DATE_TOLERANCE_DAYS = 3;
+const DUP_DESC_STOPWORDS = new Set(['COMPRA', 'CHL', 'CHILE', 'SANTIAGO', 'LTDA', 'SPA']);
+
+function descTokens(desc) {
+  return new Set(
+    (desc || '')
+      .toUpperCase()
+      .normalize('NFD').replace(/[̀-ͯ]/g, '')
+      .replace(/[^A-Z0-9]+/g, ' ')
+      .split(' ')
+      .filter(t => t.length > 2 && !DUP_DESC_STOPWORDS.has(t))
+  );
+}
+
+function sharesToken(descA, descB) {
+  const tokensB = descTokens(descB);
+  for (const t of descTokens(descA)) {
+    if (tokensB.has(t)) return true;
+  }
+  return false;
+}
+
 function fmtCLP(n) {
   return new Intl.NumberFormat('es-CL', { style: 'currency', currency: 'CLP', minimumFractionDigits: 0 }).format(n ?? 0);
 }
@@ -251,9 +277,13 @@ router.post('/check-duplicates', authenticate, async (req, res) => {
     const filtered = transactions.filter(tx => tx.date && tx.amount);
     if (filtered.length === 0) return res.json({ duplicates: [], count: 0 });
 
-    // Titular: matchear por (fecha, monto) porque el notifier del celular guarda la misma
-    // transacción con descripción expandida (ej: "CINE HOYTS PUERTO MONTT CHL") distinta
-    // a la del estado web CMR (ej: "COMPRA CINEPOLIS PASMAR P.MON").
+    // Titular: matchear por monto + fecha dentro de un rango de tolerancia, porque el
+    // notifier del celular guarda la fecha exacta de la compra mientras que el estado de
+    // cuenta CMR web fecha la compra el día que el banco la procesa (pueden diferir varios
+    // días). Además la descripción suele venir expandida por el comercio (ej: "CINE HOYTS
+    // PUERTO MONTT CHL") y distinta a la del estado web (ej: "COMPRA CINEPOLIS PASMAR
+    // P.MON"), por lo que solo se exige descripción igual cuando la fecha no coincide
+    // exactamente — ahí se exige al menos una palabra en común para evitar falsos positivos.
     // Adicional: matchear por (fecha, monto, descripción) porque la descripción coincide
     // exactamente si ya fue importado desde CMR web anteriormente.
     const titular = filtered.filter(tx => tx.persona !== 'Adicional');
@@ -264,8 +294,10 @@ router.post('/check-duplicates', authenticate, async (req, res) => {
 
     for (const tx of titular) {
       const base = params.length;
-      conditions.push(`(date = $${base + 1}::date AND amount = $${base + 2}::numeric)`);
-      params.push(tx.date, tx.amount);
+      conditions.push(
+        `(amount = $${base + 1}::numeric AND date BETWEEN $${base + 2}::date - ${DUP_DATE_TOLERANCE_DAYS} AND $${base + 2}::date + ${DUP_DATE_TOLERANCE_DAYS})`
+      );
+      params.push(tx.amount, tx.date);
     }
     for (const tx of adicional) {
       const base = params.length;
@@ -283,24 +315,37 @@ router.post('/check-duplicates', authenticate, async (req, res) => {
       params
     );
 
-    // Indexar resultados de la DB: clave (fecha|monto) → descripción existente
-    const dupByDateAmount = new Map();
-    const dupByDateAmountDesc = new Set();
+    // Indexar candidatos de la DB por monto para matchear contra cada tx importada
+    const candidatesByAmount = new Map();
     for (const r of result.rows) {
-      const key = `${r.date}|${parseFloat(r.amount)}`;
-      dupByDateAmount.set(key, r.description);
-      dupByDateAmountDesc.add(`${key}|${r.description}`);
+      const amt = parseFloat(r.amount);
+      if (!candidatesByAmount.has(amt)) candidatesByAmount.set(amt, []);
+      candidatesByAmount.get(amt).push({ description: r.description, date: r.date });
     }
 
-    const duplicates = filtered.filter(tx => {
-      const key = `${tx.date}|${parseFloat(tx.amount)}`;
-      if (tx.persona !== 'Adicional') return dupByDateAmount.has(key);
-      return dupByDateAmountDesc.has(`${key}|${tx.description}`);
-    }).map(tx => {
-      const key = `${tx.date}|${parseFloat(tx.amount)}`;
-      const existingDescription = dupByDateAmount.get(key) || tx.description;
-      return { description: tx.description, date: tx.date, amount: tx.amount, existingDescription, isDuplicate: true };
-    });
+    const duplicates = [];
+    for (const tx of filtered) {
+      const candidates = candidatesByAmount.get(parseFloat(tx.amount)) || [];
+      let match = null;
+
+      if (tx.persona === 'Adicional') {
+        match = candidates.find(c => c.date === tx.date && c.description === tx.description);
+      } else {
+        // Fecha exacta: alcanza con monto (ya filtrado por DB) sin exigir descripción.
+        match = candidates.find(c => c.date === tx.date);
+        if (!match) {
+          // Fecha dentro de tolerancia pero distinta: exigir al menos una palabra en común.
+          match = candidates.find(c => {
+            const diffDays = Math.abs((new Date(c.date) - new Date(tx.date)) / 86400000);
+            return diffDays <= DUP_DATE_TOLERANCE_DAYS && sharesToken(c.description, tx.description);
+          });
+        }
+      }
+
+      if (match) {
+        duplicates.push({ description: tx.description, date: tx.date, amount: tx.amount, existingDescription: match.description, isDuplicate: true });
+      }
+    }
 
     res.json({ duplicates, count: duplicates.length });
   } catch (err) {

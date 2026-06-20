@@ -884,7 +884,7 @@ export default function FinancesPage() {
                 Puedes cambiar la categoría de cada transacción antes de importar.
                 {importTxs.some(tx => tx.isDuplicate) && (
                   <div style={{ marginTop: '0.5rem', padding: '0.5rem', background: '#fee2e2', borderRadius: 4, color: '#991b1b' }}>
-                    ⚠️ Las transacciones marcadas con ⚠️ ya existen en la BD (coinciden por empresa, fecha y monto) y han sido automáticamente desmarcadas.
+                    ⚠️ Las transacciones marcadas con ⚠️ ya existen en la BD (coinciden por monto, fecha aproximada y/o descripción) y han sido automáticamente desmarcadas.
                   </div>
                 )}
               </small>
