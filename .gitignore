@@ -11,7 +11,9 @@ node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-package-lock.json
+# package-lock.json versionado a propósito: sin él cada build de
+# Docker resolvía dependencias frescas y entró TypeScript 7, que rompió
+# el build del frontend (ver overrides en frontend/package.json).
 yarn.lock
 pnpm-lock.yaml
 

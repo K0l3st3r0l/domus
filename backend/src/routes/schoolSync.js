@@ -6,6 +6,7 @@ const pool = require('../models/db');
 const { authenticate } = require('../middleware/auth');
 const { chileNaiveToUTC, chileDateParts } = require('../utils/chileTime');
 const { processEmail, getTokenStats, checkTokenHealth } = require('../services/aiService');
+const { SCHEDULE_TEMPLATES, SEED_CHILDREN } = require('../constants/schoolSeed');
 
 const SCOPES = [
   'https://www.googleapis.com/auth/gmail.readonly',
@@ -23,11 +24,25 @@ function getOAuth2Client() {
   );
 }
 
+// Express 4 no captura rejections de handlers async: una promesa rechazada
+// deja la request colgada y tumba el proceso (Node >=15 aborta en
+// unhandledRejection). Todo handler async del módulo va envuelto acá.
+function asyncRoute(handler) {
+  return (req, res, next) => {
+    Promise.resolve(handler(req, res, next)).catch(err => {
+      console.error(`Error no capturado en ${req.method} ${req.originalUrl}:`, err);
+      if (!res.headersSent) res.status(500).json({ error: 'Error del servidor' });
+    });
+  };
+}
+
 // ─── Permisos de familia ─────────────────────────────────────────────────────
 // parent → ve todos los hijos. child → solo el hijo cuyo email coincide con el suyo.
 
-async function getVisibleChildIds(user) {
-  if (!user) return [];
+// Resuelve rol e hijos visibles de una vez: antes cada endpoint sacaba solo los
+// ids y quien necesitaba el rol tenía que inferirlo del conteo de filas.
+async function resolveFamilyContext(user) {
+  if (!user) return { familyRole: null, childIds: [] };
   // family_role no viaja en JWTs viejos, así que se resuelve siempre desde users.
   let familyRole = user.family_role;
   let email = user.email;
@@ -40,10 +55,15 @@ async function getVisibleChildIds(user) {
   }
   if (familyRole === 'child') {
     const r = await pool.query('SELECT id FROM children WHERE email = $1', [email]);
-    return r.rows.map(x => x.id);
+    return { familyRole: 'child', childIds: r.rows.map(x => x.id) };
   }
   const r = await pool.query('SELECT id FROM children');
-  return r.rows.map(x => x.id);
+  return { familyRole: familyRole || 'parent', childIds: r.rows.map(x => x.id) };
+}
+
+async function getVisibleChildIds(user) {
+  const { childIds } = await resolveFamilyContext(user);
+  return childIds;
 }
 
 async function getChildByEmail(email) {
@@ -68,10 +88,14 @@ async function ensureChild(email, name) {
 
 // ─── GET /api/school-sync/status ─────────────────────────────────────────────
 // Devuelve el estado por hijo (no por usuario). Toda la familia ve lo mismo.
-router.get('/status', authenticate, async (req, res) => {
+router.get('/status', authenticate, asyncRoute(async (req, res) => {
   try {
     const result = await pool.query(
+      // is_connected distingue "hijo registrado" de "hijo con cuenta Google
+      // vinculada". El LEFT JOIN devuelve fila para todo hijo de la tabla, así
+      // que sin esta bandera el frontend marcaba como conectado a cualquiera.
       `SELECT c.email AS child_email, c.name AS child_name,
+              (gt.child_id IS NOT NULL) AS is_connected,
               gt.last_sync, gt.created_at, gt.token_valid,
               gt.connected_by_user_id, gt.connected_at,
               u.name AS connected_by_name, u.email AS connected_by_email
@@ -85,11 +109,39 @@ router.get('/status', authenticate, async (req, res) => {
     console.error('Error en status:', err);
     res.status(500).json({ error: 'Error del servidor' });
   }
-});
+}));
+
+// ─── GET /api/school-sync/children ───────────────────────────────────────────
+// Hijos que la UI debe mostrar: los registrados en `children` más los semilla
+// que todavía no existen (para poder ofrecer la primera conexión).
+router.get('/children', authenticate, asyncRoute(async (req, res) => {
+  try {
+    const { familyRole, childIds } = await resolveFamilyContext(req.user);
+    const { rows } = await pool.query(
+      'SELECT email, name FROM children WHERE id = ANY($1::int[]) ORDER BY name',
+      [childIds]
+    );
+
+    const known = new Set(rows.map(r => r.email));
+    // Un hijo con family_role=child solo se ve a sí mismo: no se le agregan
+    // los semilla, que pertenecen a la vista de los padres.
+    const seed = familyRole === 'child' ? [] : SEED_CHILDREN.filter(c => !known.has(c.email));
+
+    const children = [...rows, ...seed].map(c => ({
+      email: c.email,
+      name: c.name || c.email.split('@')[0],
+      has_template: Boolean(SCHEDULE_TEMPLATES[c.email]),
+    }));
+    res.json({ children });
+  } catch (err) {
+    console.error('Error listando hijos:', err);
+    res.status(500).json({ error: 'Error del servidor' });
+  }
+}));
 
 // ─── GET /api/school-sync/auth-url ───────────────────────────────────────────
 // Si ya existe token activo para ese hijo, responde 409 a menos que ?force=1.
-router.get('/auth-url', authenticate, async (req, res) => {
+router.get('/auth-url', authenticate, asyncRoute(async (req, res) => {
   const { child_email, child_name, force } = req.query;
   if (!child_email) return res.status(400).json({ error: 'child_email requerido' });
 
@@ -130,10 +182,10 @@ router.get('/auth-url', authenticate, async (req, res) => {
   });
 
   res.json({ url });
-});
+}));
 
 // ─── GET /api/school-sync/callback ───────────────────────────────────────────
-router.get('/callback', async (req, res) => {
+router.get('/callback', asyncRoute(async (req, res) => {
   const { code, state, error } = req.query;
   const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3001';
 
@@ -181,10 +233,15 @@ router.get('/callback', async (req, res) => {
     console.error('Error en callback OAuth:', err);
     res.redirect(`${frontendUrl}/school-sync?error=token_exchange_failed`);
   }
-});
+}));
 
 // ─── POST /api/school-sync/sync ──────────────────────────────────────────────
-router.post('/sync', authenticate, async (req, res) => {
+router.post('/sync', authenticate, asyncRoute(async (req, res) => {
+  const userId = req.user.id;
+  if (syncProgress.get(userId)?.running) {
+    return res.status(409).json({ error: 'Ya hay una sincronización en curso' });
+  }
+
   try {
     const visibleIds = await getVisibleChildIds(req.user);
     const result = await pool.query(
@@ -197,10 +254,9 @@ router.post('/sync', authenticate, async (req, res) => {
     );
 
     const children = result.rows;
-    const userId = req.user.id;
 
     const STEPS_PER_CHILD = 5;
-    syncProgress.set(userId, {
+    touchProgress(syncProgress, userId, {
       running: true, done: false,
       completed: 0, total: children.length * STEPS_PER_CHILD,
       stepLabel: 'Iniciando…', error: null,
@@ -210,7 +266,7 @@ router.post('/sync', authenticate, async (req, res) => {
 
     const step = (label) => {
       const prev = syncProgress.get(userId);
-      if (prev) syncProgress.set(userId, { ...prev, completed: prev.completed + 1, stepLabel: label });
+      if (prev) touchProgress(syncProgress, userId, { ...prev, completed: prev.completed + 1, stepLabel: label });
     };
 
     for (const row of children) {
@@ -220,17 +276,17 @@ router.post('/sync', authenticate, async (req, res) => {
     }
 
     const prev = syncProgress.get(userId);
-    if (prev) syncProgress.set(userId, { ...prev, running: false, done: true, stepLabel: '✅ Completado' });
+    if (prev) touchProgress(syncProgress, userId, { ...prev, running: false, done: true, stepLabel: '✅ Completado' });
   } catch (err) {
     console.error('Error en sync manual:', err);
     const prev = syncProgress.get(req.user.id);
-    if (prev) syncProgress.set(req.user.id, { ...prev, running: false, done: true, error: err.message });
+    if (prev) touchProgress(syncProgress, req.user.id, { ...prev, running: false, done: true, error: err.message });
     if (!res.headersSent) res.status(500).json({ error: 'Error del servidor' });
   }
-});
+}));
 
 // ─── GET /api/school-sync/emails ─────────────────────────────────────────────
-router.get('/emails', authenticate, async (req, res) => {
+router.get('/emails', authenticate, asyncRoute(async (req, res) => {
   const { child } = req.query;
   try {
     const visibleIds = await getVisibleChildIds(req.user);
@@ -261,10 +317,10 @@ router.get('/emails', authenticate, async (req, res) => {
     console.error('Error en /emails:', err);
     res.status(500).json({ error: 'Error del servidor' });
   }
-});
+}));
 
 // ─── GET /api/school-sync/assignments ────────────────────────────────────────
-router.get('/assignments', authenticate, async (req, res) => {
+router.get('/assignments', authenticate, asyncRoute(async (req, res) => {
   const { child } = req.query;
   try {
     const visibleIds = await getVisibleChildIds(req.user);
@@ -307,10 +363,10 @@ router.get('/assignments', authenticate, async (req, res) => {
     console.error('Error en /assignments:', err);
     res.status(500).json({ error: 'Error del servidor' });
   }
-});
+}));
 
 // ─── POST /api/school-sync/sync-to-calendar ─────────────────────────────────
-router.post('/sync-to-calendar', authenticate, async (req, res) => {
+router.post('/sync-to-calendar', authenticate, asyncRoute(async (req, res) => {
   const { assignmentId, suggestedDate } = req.body;
   if (!assignmentId) return res.status(400).json({ error: 'assignmentId requerido' });
 
@@ -327,28 +383,27 @@ router.post('/sync-to-calendar', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'Esta tarea ya fue agregada al calendario' });
     }
 
-    const description = [task.course_name, task.description].filter(Boolean).join('\n');
     const startTime = suggestedDate ? new Date(suggestedDate) : (task.due_date || new Date());
-    const eventResult = await pool.query(
-      `INSERT INTO calendar_events (title, description, start_time, end_time, all_day, color, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [`📚 ${task.title}`, description, startTime, startTime, true, '#10b981', req.user.id]
-    );
+    if (Number.isNaN(startTime.getTime())) {
+      return res.status(400).json({ error: 'suggestedDate inválida' });
+    }
 
-    await pool.query(
-      'UPDATE school_assignments SET synced_to_calendar = true, calendar_event_id = $1 WHERE id = $2',
-      [eventResult.rows[0].id, assignmentId]
-    );
+    const event = await createCalendarEventForAssignment({
+      assignmentId, task, startTime, userId: req.user.id,
+    });
+    if (!event) {
+      return res.status(400).json({ error: 'Esta tarea ya fue agregada al calendario' });
+    }
 
-    res.json({ success: true, event: eventResult.rows[0] });
+    res.json({ success: true, event });
   } catch (err) {
     console.error('Error en sync-to-calendar:', err);
     res.status(500).json({ error: 'Error del servidor' });
   }
-});
+}));
 
 // ─── GET /api/school-sync/emails/:gmailId/body ──────────────────────────────
-router.get('/emails/:gmailId/body', authenticate, async (req, res) => {
+router.get('/emails/:gmailId/body', authenticate, asyncRoute(async (req, res) => {
   const { gmailId } = req.params;
   try {
     const visibleIds = await getVisibleChildIds(req.user);
@@ -411,10 +466,10 @@ router.get('/emails/:gmailId/body', authenticate, async (req, res) => {
     }
     res.status(500).json({ error: 'Error del servidor' });
   }
-});
+}));
 
 // ─── GET /api/school-sync/emails/:gmailId/attachments/:attachmentId ──────────
-router.get('/emails/:gmailId/attachments/:attachmentId', authenticate, async (req, res) => {
+router.get('/emails/:gmailId/attachments/:attachmentId', authenticate, asyncRoute(async (req, res) => {
   const { gmailId, attachmentId } = req.params;
   try {
     const visibleIds = await getVisibleChildIds(req.user);
@@ -448,54 +503,53 @@ router.get('/emails/:gmailId/attachments/:attachmentId', authenticate, async (re
     if (isTokenRevokedError(err)) return res.status(401).json({ error: 'token_revoked' });
     res.status(500).json({ error: 'Error del servidor' });
   }
-});
+}));
 
 // ─── POST /api/school-sync/sync-to-calendar/bulk ─────────────────────────────
-router.post('/sync-to-calendar/bulk', authenticate, async (req, res) => {
+router.post('/sync-to-calendar/bulk', authenticate, asyncRoute(async (req, res) => {
   const { assignmentIds } = req.body;
   if (!Array.isArray(assignmentIds) || assignmentIds.length === 0) {
     return res.status(400).json({ error: 'assignmentIds requerido' });
   }
 
   const visibleIds = await getVisibleChildIds(req.user);
+
+  // Una sola query para todas las tareas en vez de un SELECT por id.
+  const { rows: tasks } = await pool.query(
+    'SELECT * FROM school_assignments WHERE id = ANY($1::int[]) AND child_id = ANY($2::int[])',
+    [assignmentIds, visibleIds]
+  );
+  const byId = new Map(tasks.map(t => [t.id, t]));
+
   const results = [];
   for (const id of assignmentIds) {
+    const task = byId.get(Number(id));
+    if (!task) {
+      results.push({ id, error: 'no encontrada' });
+      continue;
+    }
+    if (task.synced_to_calendar) {
+      results.push({ id, skipped: true });
+      continue;
+    }
     try {
-      const assignResult = await pool.query(
-        'SELECT * FROM school_assignments WHERE id = $1 AND child_id = ANY($2::int[])',
-        [id, visibleIds]
-      );
-      if (assignResult.rows.length === 0) {
-        results.push({ id, error: 'no encontrada' });
-        continue;
-      }
-      const task = assignResult.rows[0];
-      if (task.synced_to_calendar) {
-        results.push({ id, skipped: true });
-        continue;
-      }
-      const description = [task.course_name, task.description].filter(Boolean).join('\n');
-      const startTime = task.due_date || new Date();
-      const eventResult = await pool.query(
-        `INSERT INTO calendar_events (title, description, start_time, end_time, all_day, color, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-        [`📚 ${task.title}`, description, startTime, startTime, true, '#10b981', req.user.id]
-      );
-      await pool.query(
-        'UPDATE school_assignments SET synced_to_calendar = true, calendar_event_id = $1 WHERE id = $2',
-        [eventResult.rows[0].id, id]
-      );
-      results.push({ id, success: true });
+      const event = await createCalendarEventForAssignment({
+        assignmentId: task.id,
+        task,
+        startTime: task.due_date || new Date(),
+        userId: req.user.id,
+      });
+      results.push(event ? { id, success: true } : { id, skipped: true });
     } catch (err) {
       console.error('Error syncing assignment to calendar:', err);
       results.push({ id, error: err.message });
     }
   }
   res.json({ results });
-});
+}));
 
 // ─── POST /api/school-sync/sync-email-to-calendar ────────────────────────────
-router.post('/sync-email-to-calendar', authenticate, async (req, res) => {
+router.post('/sync-email-to-calendar', authenticate, asyncRoute(async (req, res) => {
   const { emailId } = req.body;
   if (!emailId) return res.status(400).json({ error: 'emailId requerido' });
 
@@ -541,10 +595,10 @@ router.post('/sync-email-to-calendar', authenticate, async (req, res) => {
     console.error('Error syncing email to calendar:', err);
     res.status(500).json({ error: 'Error al agregar reunión al calendario' });
   }
-});
+}));
 
 // ─── GET /api/school-sync/schedules ──────────────────────────────────────────
-router.get('/schedules', authenticate, async (req, res) => {
+router.get('/schedules', authenticate, asyncRoute(async (req, res) => {
   try {
     const visibleIds = await getVisibleChildIds(req.user);
     if (visibleIds.length === 0) return res.json([]);
@@ -561,10 +615,10 @@ router.get('/schedules', authenticate, async (req, res) => {
     console.error('Error obteniendo horarios:', err);
     res.status(500).json({ error: 'Error del servidor' });
   }
-});
+}));
 
 // ─── POST /api/school-sync/schedules ─────────────────────────────────────────
-router.post('/schedules', authenticate, async (req, res) => {
+router.post('/schedules', authenticate, asyncRoute(async (req, res) => {
   const { child_email, schedule } = req.body;
   if (!child_email || !Array.isArray(schedule)) {
     return res.status(400).json({ error: 'child_email y schedule[] requeridos' });
@@ -575,24 +629,82 @@ router.post('/schedules', authenticate, async (req, res) => {
     if (!child || !visibleIds.includes(child.id)) {
       return res.status(403).json({ error: 'No tienes permiso sobre este hijo' });
     }
-    await pool.query('DELETE FROM school_schedules WHERE child_id = $1', [child.id]);
-    for (const entry of schedule) {
-      await pool.query(
-        `INSERT INTO school_schedules (child_id, day_of_week, period_order, subject, start_time, end_time)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [child.id, entry.day_of_week, entry.period_order, entry.subject,
-         entry.start_time || null, entry.end_time || null]
-      );
+
+    const invalid = schedule.findIndex(e =>
+      !Number.isInteger(Number(e?.day_of_week)) || Number(e.day_of_week) < 0 || Number(e.day_of_week) > 6 ||
+      !Number.isInteger(Number(e?.period_order)) || Number(e.period_order) < 1 ||
+      !e?.subject
+    );
+    if (invalid !== -1) {
+      return res.status(400).json({ error: `Entrada inválida en schedule[${invalid}]` });
     }
-    res.json({ success: true, saved: schedule.length });
+
+    const saved = await replaceSchedule(child.id, schedule);
+    res.json({ success: true, saved });
   } catch (err) {
     console.error('Error guardando horarios:', err);
     res.status(500).json({ error: 'Error del servidor' });
   }
-});
+}));
+
+// El DELETE + INSERT va en una transacción: si fallaba un insert a medio
+// camino, el hijo quedaba con el horario parcialmente borrado y sin aviso.
+async function replaceSchedule(childId, schedule) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('DELETE FROM school_schedules WHERE child_id = $1', [childId]);
+
+    if (schedule.length > 0) {
+      const values = [];
+      const rows = schedule.map((e, i) => {
+        const b = i * 6;
+        values.push(childId, e.day_of_week, e.period_order, e.subject, e.start_time || null, e.end_time || null);
+        return `($${b + 1}, $${b + 2}, $${b + 3}, $${b + 4}, $${b + 5}, $${b + 6})`;
+      });
+      await client.query(
+        `INSERT INTO school_schedules (child_id, day_of_week, period_order, subject, start_time, end_time)
+         VALUES ${rows.join(', ')}`,
+        values
+      );
+    }
+
+    await client.query('COMMIT');
+    return schedule.length;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// ─── POST /api/school-sync/schedules/template ────────────────────────────────
+// Aplica el horario semilla del hijo. El template vive en el backend para no
+// enviar ~100 líneas de datos escolares en el bundle del frontend.
+router.post('/schedules/template', authenticate, asyncRoute(async (req, res) => {
+  const { child_email } = req.body;
+  if (!child_email) return res.status(400).json({ error: 'child_email requerido' });
+
+  const template = SCHEDULE_TEMPLATES[child_email];
+  if (!template) return res.status(404).json({ error: 'No hay horario predefinido para este hijo' });
+
+  try {
+    const visibleIds = await getVisibleChildIds(req.user);
+    const child = await getChildByEmail(child_email);
+    if (!child || !visibleIds.includes(child.id)) {
+      return res.status(403).json({ error: 'No tienes permiso sobre este hijo' });
+    }
+    const saved = await replaceSchedule(child.id, template);
+    res.json({ success: true, saved });
+  } catch (err) {
+    console.error('Error aplicando template de horario:', err);
+    res.status(500).json({ error: 'Error del servidor' });
+  }
+}));
 
 // ─── DELETE /api/school-sync/schedules/:childEmail ───────────────────────────
-router.delete('/schedules/:childEmail', authenticate, async (req, res) => {
+router.delete('/schedules/:childEmail', authenticate, asyncRoute(async (req, res) => {
   try {
     const visibleIds = await getVisibleChildIds(req.user);
     const child = await getChildByEmail(decodeURIComponent(req.params.childEmail));
@@ -605,10 +717,10 @@ router.delete('/schedules/:childEmail', authenticate, async (req, res) => {
     console.error('Error borrando horarios:', err);
     res.status(500).json({ error: 'Error del servidor' });
   }
-});
+}));
 
 // ─── DELETE /api/school-sync/disconnect ──────────────────────────────────────
-router.delete('/disconnect', authenticate, async (req, res) => {
+router.delete('/disconnect', authenticate, asyncRoute(async (req, res) => {
   const { child_email } = req.body;
   if (!child_email) return res.status(400).json({ error: 'child_email requerido' });
 
@@ -627,19 +739,36 @@ router.delete('/disconnect', authenticate, async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: 'Error del servidor' });
   }
-});
+}));
 
 // ─── GET /api/school-sync/token-stats ────────────────────────────────────────
-router.get('/token-stats', authenticate, async (req, res) => {
+router.get('/token-stats', authenticate, asyncRoute(async (req, res) => {
   const stats = getTokenStats();
   const health = checkTokenHealth();
   if (!stats) return res.json({ message: 'Sin datos aún. Procesa algunos correos primero.' });
   res.json({ ...stats, health });
-});
+}));
 
 // ─── In-memory progress stores ───────────────────────────────────────────────
+// Se limpian cuando el cliente hace polling hasta el final, pero si cierra la
+// pestaña antes la entrada quedaría viva para siempre. El barrido periódico
+// descarta las que ya nadie va a leer.
 const reprocessProgress = new Map();
 const syncProgress = new Map();
+const PROGRESS_TTL_MS = 30 * 60 * 1000;
+
+function touchProgress(store, key, value) {
+  store.set(key, { ...value, updatedAt: Date.now() });
+}
+
+setInterval(() => {
+  const cutoff = Date.now() - PROGRESS_TTL_MS;
+  for (const store of [reprocessProgress, syncProgress]) {
+    for (const [key, value] of store) {
+      if ((value.updatedAt || 0) < cutoff) store.delete(key);
+    }
+  }
+}, PROGRESS_TTL_MS).unref();
 
 router.get('/sync/progress', authenticate, (req, res) => {
   const progress = syncProgress.get(req.user.id);
@@ -657,7 +786,7 @@ router.get('/reprocess/progress', authenticate, (req, res) => {
 });
 
 // ─── POST /api/school-sync/process-emails ────────────────────────────────────
-router.post('/process-emails', authenticate, async (req, res) => {
+router.post('/process-emails', authenticate, asyncRoute(async (req, res) => {
   try {
     const visibleIds = await getVisibleChildIds(req.user);
     const result = await processUnreadEmails(visibleIds, req.user.id);
@@ -666,7 +795,7 @@ router.post('/process-emails', authenticate, async (req, res) => {
     console.error('Error processing emails:', err);
     res.status(500).json({ error: 'Error al procesar correos' });
   }
-});
+}));
 
 // ─── POST /api/school-sync/reprocess ─────────────────────────────────────────
 router.post('/reprocess', authenticate, (req, res) => {
@@ -678,7 +807,7 @@ router.post('/reprocess', authenticate, (req, res) => {
     return res.status(409).json({ error: 'Ya hay un reprocesamiento en curso' });
   }
 
-  reprocessProgress.set(userId, { running: true, done: false, total: 0, processed: 0, eventsCreated: 0, error: null });
+  touchProgress(reprocessProgress, userId, { running: true, done: false, total: 0, processed: 0, eventsCreated: 0, error: null });
   res.json({ started: true });
 
   (async () => {
@@ -688,14 +817,14 @@ router.post('/reprocess', authenticate, (req, res) => {
     } catch (err) {
       console.error('Error reprocessing emails:', err);
       const prev = reprocessProgress.get(userId) || {};
-      reprocessProgress.set(userId, { ...prev, running: false, done: true, error: err.message });
+      touchProgress(reprocessProgress, userId, { ...prev, running: false, done: true, error: err.message });
     }
   })();
 });
 
 // ─── AI Training / Feedback ──────────────────────────────────────────────────
 
-router.get('/training/queue', authenticate, async (req, res) => {
+router.get('/training/queue', authenticate, asyncRoute(async (req, res) => {
   try {
     const visibleIds = await getVisibleChildIds(req.user);
     const { rows } = await pool.query(
@@ -723,9 +852,9 @@ router.get('/training/queue', authenticate, async (req, res) => {
     console.error('Error loading training queue:', err.message);
     res.status(500).json({ error: 'Error cargando cola de entrenamiento' });
   }
-});
+}));
 
-router.patch('/emails/:gmailId/feedback', authenticate, async (req, res) => {
+router.patch('/emails/:gmailId/feedback', authenticate, asyncRoute(async (req, res) => {
   try {
     const { gmailId } = req.params;
     const { feedback, correctedType, observation } = req.body;
@@ -757,7 +886,7 @@ router.patch('/emails/:gmailId/feedback', authenticate, async (req, res) => {
     console.error('Error saving feedback:', err.message);
     res.status(500).json({ error: 'Error guardando feedback' });
   }
-});
+}));
 
 // ─── Email body parsing helpers ──────────────────────────────────────────────
 
@@ -851,10 +980,14 @@ function isTokenRevokedError(err) {
 }
 
 async function markTokenInvalid(childId) {
-  pool.query(
-    'UPDATE google_tokens SET token_valid = FALSE WHERE child_id = $1',
-    [childId]
-  ).catch(e => console.error('Error marcando token inválido:', e.message));
+  try {
+    await pool.query(
+      'UPDATE google_tokens SET token_valid = FALSE WHERE child_id = $1',
+      [childId]
+    );
+  } catch (e) {
+    console.error('Error marcando token inválido:', e.message);
+  }
 }
 
 async function getAuthClient(childId) {
@@ -981,6 +1114,31 @@ const CALENDAR_EVENT_TYPES = ['evaluacion', 'tarea', 'reunion'];
 // conditional UPDATE. If another concurrent run already linked this email
 // to a different event (e.g. two overlapping reprocess passes), the just
 // inserted row is rolled back instead of leaving an orphaned duplicate.
+// Mismo patrón que createCalendarEventForEmail, para tareas de Classroom.
+// Sin el claim condicional, dos clics seguidos en "Agregar" pasan ambos el
+// chequeo de synced_to_calendar y dejan dos eventos idénticos.
+async function createCalendarEventForAssignment({ assignmentId, task, startTime, userId }) {
+  const description = [task.course_name, task.description].filter(Boolean).join('\n');
+  const insertResult = await pool.query(
+    `INSERT INTO calendar_events (title, description, start_time, end_time, all_day, color, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+    [`📚 ${task.title}`, description, startTime, startTime, true, '#10b981', userId]
+  );
+  const event = insertResult.rows[0];
+
+  const claim = await pool.query(
+    `UPDATE school_assignments SET synced_to_calendar = true, calendar_event_id = $1
+      WHERE id = $2 AND synced_to_calendar IS NOT TRUE RETURNING id`,
+    [event.id, assignmentId]
+  );
+
+  if (claim.rows.length === 0) {
+    await pool.query('DELETE FROM calendar_events WHERE id = $1', [event.id]);
+    return null;
+  }
+  return event;
+}
+
 async function createCalendarEventForEmail({ emailId, title, description, timing, userId }) {
   const insertResult = await pool.query(
     `INSERT INTO calendar_events (title, description, start_time, end_time, all_day, color, created_by)
@@ -1008,6 +1166,10 @@ async function processUnreadEmails(visibleChildIds, userId) {
 
   try {
     const scheduleCache = {};
+    // Un correo cuyo UPDATE de ai_processed falla sigue calzando con el WHERE,
+    // así que el mismo lote volvería en cada vuelta y el while nunca terminaría.
+    // Se excluyen explícitamente los que ya fallaron en esta corrida.
+    const failedIds = [];
 
     while (true) {
       const emails = await pool.query(
@@ -1015,10 +1177,11 @@ async function processUnreadEmails(visibleChildIds, userId) {
          WHERE child_id = ANY($1::int[])
            AND is_read = false
            AND ai_processed = false
+           AND NOT (id = ANY($3::int[]))
            AND (date IS NULL OR date >= CURRENT_DATE - INTERVAL '60 days')
          ORDER BY date ASC
          LIMIT $2`,
-        [visibleChildIds, PROCESS_BATCH_SIZE]
+        [visibleChildIds, PROCESS_BATCH_SIZE, failedIds]
       );
 
       if (emails.rows.length === 0) break;
@@ -1076,10 +1239,14 @@ async function processUnreadEmails(visibleChildIds, userId) {
           }
         } catch (err) {
           console.error(`Error processing email ${email.id}:`, err.message);
+          failedIds.push(email.id);
         }
       }
     }
 
+    if (failedIds.length > 0) {
+      console.warn(`⚠ ${failedIds.length} correo(s) omitido(s) tras fallar: ${failedIds.join(', ')}`);
+    }
     console.log(`✓ Processed ${processedCount} emails, created ${eventsCreated} calendar events`);
     return { count: processedCount, eventsCreated };
   } catch (err) {
@@ -1094,7 +1261,7 @@ async function reprocessEmailsByRange(visibleChildIds, userId, dateFrom, dateTo,
 
   const setProgress = (patch) => {
     if (!progressStore) return;
-    progressStore.set(userId, { ...progressStore.get(userId), ...patch });
+    touchProgress(progressStore, userId, { ...progressStore.get(userId), ...patch });
   };
 
   try {
@@ -1182,19 +1349,31 @@ async function reprocessEmailsByRange(visibleChildIds, userId, dateFrom, dateTo,
   }
 }
 
+// Dominio del colegio y correo del apoderado salen de env para no dejar datos
+// personales incrustados en el código.
+const SCHOOL_MAIL_DOMAIN = process.env.SCHOOL_MAIL_DOMAIN || 'cicpm.cl';
+const GUARDIAN_EMAIL = process.env.SCHOOL_GUARDIAN_EMAIL || '';
+const SYNC_WINDOW_DAYS = Number(process.env.SCHOOL_SYNC_WINDOW_DAYS) || 60;
+
+function buildGmailQueries() {
+  const queries = [
+    { q: `from:${SCHOOL_MAIL_DOMAIN} newer_than:${SYNC_WINDOW_DAYS}d`, includeSpamTrash: false },
+  ];
+  // Búsqueda libre por el correo del apoderado: matchea from/to/cc/body, así
+  // que ya cubre el `from:` que antes se consultaba por separado.
+  if (GUARDIAN_EMAIL) {
+    queries.push({ q: `${GUARDIAN_EMAIL} newer_than:${SYNC_WINDOW_DAYS}d`, includeSpamTrash: true });
+  }
+  return queries;
+}
+
 async function syncGmail(childId, auth) {
   const gmail = google.gmail({ version: 'v1', auth });
-
-  const queries = [
-    { q: 'from:cicpm.cl newer_than:60d', includeSpamTrash: false },
-    { q: 'from:mhrehbein@gmail.com newer_than:60d', includeSpamTrash: true },
-    { q: 'mhrehbein@gmail.com newer_than:60d', includeSpamTrash: true },
-  ];
 
   const seenIds = new Set();
   const messages = [];
 
-  for (const { q, includeSpamTrash } of queries) {
+  for (const { q, includeSpamTrash } of buildGmailQueries()) {
     let pageToken;
     do {
       const listRes = await gmail.users.messages.list({
@@ -1214,9 +1393,19 @@ async function syncGmail(childId, auth) {
     } while (pageToken);
   }
 
+  // Una sola query para saber cuáles ya están guardados, en vez de un SELECT
+  // por mensaje (eran cientos por sync).
+  const known = new Set();
+  if (messages.length > 0) {
+    const { rows } = await pool.query(
+      'SELECT gmail_id FROM school_emails WHERE gmail_id = ANY($1::text[])',
+      [messages.map(m => m.id)]
+    );
+    for (const r of rows) known.add(r.gmail_id);
+  }
+
   for (const msg of messages) {
-    const exists = await pool.query('SELECT id FROM school_emails WHERE gmail_id = $1', [msg.id]);
-    if (exists.rows.length > 0) continue;
+    if (known.has(msg.id)) continue;
 
     const detail = await gmail.users.messages.get({
       userId: 'me',
@@ -1230,7 +1419,8 @@ async function syncGmail(childId, auth) {
       headers.find(h => h.name.toLowerCase() === name.toLowerCase())?.value || '';
 
     const rawDate = getHeader('Date');
-    const parsedDate = rawDate ? new Date(rawDate) : null;
+    let parsedDate = rawDate ? new Date(rawDate) : null;
+    if (parsedDate && Number.isNaN(parsedDate.getTime())) parsedDate = null;
     const isUnread = detail.data.labelIds?.includes('UNREAD') || false;
 
     await pool.query(
@@ -1242,7 +1432,10 @@ async function syncGmail(childId, auth) {
   }
 }
 
-async function syncClassroom(childId, auth) {
+// syncClassroom y syncClassroomAnnouncements pedían la misma lista de cursos y
+// repetían el filtro por año palabra por palabra. Se resuelve una vez por sync
+// y se reparte a los dos.
+async function listActiveCoursesForYear(childId, auth) {
   const classroom = google.classroom({ version: 'v1', auth });
 
   let courses = [];
@@ -1251,18 +1444,23 @@ async function syncClassroom(childId, auth) {
     courses = res.data.courses || [];
   } catch (err) {
     console.error(`Error obteniendo cursos para child_id=${childId}:`, err.message);
-    return;
+    return null;
   }
 
   const currentYear = new Date().getFullYear();
   const yearRe = /20(\d{2})/g;
-  courses = courses.filter(course => {
-    const years = [...course.name.matchAll(yearRe)].map(m => parseInt(m[0], 10));
+  return courses.filter(course => {
+    const years = [...(course.name || '').matchAll(yearRe)].map(m => parseInt(m[0], 10));
     if (years.length > 0) return years.some(y => y === currentYear);
     // Sin año en el nombre: excluir si el curso no tuvo actividad este año
     const lastUpdate = course.updateTime ? new Date(course.updateTime) : null;
     return lastUpdate ? lastUpdate.getFullYear() >= currentYear : true;
   });
+}
+
+async function syncClassroom(childId, auth, courses) {
+  const classroom = google.classroom({ version: 'v1', auth });
+  if (!courses) return;
 
   for (const course of courses) {
     let works = [];
@@ -1288,11 +1486,14 @@ async function syncClassroom(childId, auth) {
       let dueDate = null;
       if (work.dueDate) {
         const { year, month, day } = work.dueDate;
-        const hour = work.dueTime?.hours ?? 23;
-        const min = work.dueTime?.minutes ?? 59;
-        dueDate = new Date(
-          `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T${String(hour).padStart(2, '0')}:${String(min).padStart(2, '0')}:00`
-        );
+        // Classroom entrega dueDate/dueTime en UTC. Construir la fecha desde un
+        // string sin designador la interpretaba en la TZ del servidor, así que
+        // se usa Date.UTC explícitamente. Y como proto3 omite los campos en
+        // cero, un dueTime de 00:00 llega como {} — hay que distinguir "sin
+        // hora" (23:59) de "hora cero" en vez de usar ?? sobre cada campo.
+        const hour = work.dueTime ? (work.dueTime.hours ?? 0) : 23;
+        const min  = work.dueTime ? (work.dueTime.minutes ?? 0) : 59;
+        dueDate = new Date(Date.UTC(year, month - 1, day, hour, min, 0));
       }
 
       const creationTime = work.creationTime ? new Date(work.creationTime) : null;
@@ -1314,27 +1515,10 @@ async function syncClassroom(childId, auth) {
   }
 }
 
-async function syncClassroomAnnouncements(childId, auth) {
+async function syncClassroomAnnouncements(childId, auth, courses) {
   const classroom = google.classroom({ version: 'v1', auth });
   const { analyzeImage } = require('../services/aiService');
-
-  let courses = [];
-  try {
-    const res = await classroom.courses.list({ studentId: 'me', courseStates: ['ACTIVE'] });
-    courses = res.data.courses || [];
-  } catch (err) {
-    console.error(`Error obteniendo cursos para anuncios (child_id=${childId}):`, err.message);
-    return;
-  }
-
-  const currentYear = new Date().getFullYear();
-  const yearRe = /20(\d{2})/g;
-  courses = courses.filter(course => {
-    const years = [...course.name.matchAll(yearRe)].map(m => parseInt(m[0], 10));
-    if (years.length > 0) return years.some(y => y === currentYear);
-    const lastUpdate = course.updateTime ? new Date(course.updateTime) : null;
-    return lastUpdate ? lastUpdate.getFullYear() >= currentYear : true;
-  });
+  if (!courses) return;
 
   for (const course of courses) {
     let announcements = [];
@@ -1451,6 +1635,11 @@ async function syncClassroomAnnouncements(childId, auth) {
   }
 }
 
+// Lock por hijo: el sync manual, el callback de OAuth y el cron de cada 6h
+// pueden coincidir sobre el mismo niño. Sin esto se duplican las llamadas a
+// Gmail/Classroom y dos pasadas de IA compiten por los mismos correos.
+const syncingChildren = new Set();
+
 async function syncChild(childId, onStep = null, childName = null, userId = null) {
   const child = await getChildById(childId);
   if (!child) {
@@ -1459,15 +1648,24 @@ async function syncChild(childId, onStep = null, childName = null, userId = null
   }
   const label = childName || child.name || child.email.split('@')[0];
   const step = (text) => { if (onStep) onStep(text); };
+
+  if (syncingChildren.has(childId)) {
+    console.warn(`syncChild: ${child.email} ya se está sincronizando, se omite`);
+    step(`${label}: ya en curso, omitido`);
+    return;
+  }
+  syncingChildren.add(childId);
+
   try {
     step(`${label}: autenticando…`);
     const auth = await getAuthClient(childId);
     step(`${label}: descargando correos…`);
     await syncGmail(childId, auth);
+    const courses = await listActiveCoursesForYear(childId, auth);
     step(`${label}: descargando tareas…`);
-    await syncClassroom(childId, auth);
+    await syncClassroom(childId, auth, courses);
     step(`${label}: descargando anuncios…`);
-    await syncClassroomAnnouncements(childId, auth);
+    await syncClassroomAnnouncements(childId, auth, courses);
     step(`${label}: procesando con IA…`);
     // Sin userId explícito (ej. cron), usar quien conectó la cuenta de Google
     // del niño como dueño de los eventos auto-creados en el calendario.
@@ -1489,6 +1687,8 @@ async function syncChild(childId, onStep = null, childName = null, userId = null
     } else {
       if (onStep) step(`${label}: error — ${err.message}`);
     }
+  } finally {
+    syncingChildren.delete(childId);
   }
 }
 

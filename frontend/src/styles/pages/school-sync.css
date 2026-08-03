@@ -6,6 +6,15 @@
 /* ── Mobile section tabs (hidden on desktop) ── */
 .school-sync-mobile-tabs { display: none; }
 
+/* Hover de tarjetas: antes se hacía escribiendo style.opacity a mano en
+   onMouseEnter/onMouseLeave de cada tarjeta. */
+.school-sync-card { transition: opacity 0.15s ease; }
+.school-sync-card:hover { opacity: 0.8; }
+
+@media (hover: none) {
+  .school-sync-card:hover { opacity: 1; }
+}
+
 /* ── Main two-column grid (emails | assignments) ── */
 .school-sync-main-grid {
   display: grid;

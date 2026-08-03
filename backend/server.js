@@ -43,6 +43,15 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Error interno del servidor' });
 });
 
+// Red de seguridad: sin esto, cualquier promesa rechazada fuera de un try/catch
+// aborta el proceso (Node >=15). Preferimos loguear y seguir sirviendo.
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err);
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Domus API corriendo en puerto ${PORT}`);
@@ -51,5 +60,9 @@ app.listen(PORT, () => {
 // Sync Google Classroom + Gmail cada 6 horas
 cron.schedule('0 */6 * * *', async () => {
   console.log('[Cron] Sincronizando Google Classroom y Gmail...');
-  await syncAllChildren();
+  try {
+    await syncAllChildren();
+  } catch (err) {
+    console.error('[Cron] Error en syncAllChildren:', err.message);
+  }
 });

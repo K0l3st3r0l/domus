@@ -350,6 +350,14 @@ Responde SOLO con JSON válido:
         // timezone instead.
         extractedDate = chileNaiveStringToUTC(raw);
       }
+
+      // La IA a veces devuelve texto libre ("próximo martes") en vez de una
+      // fecha ISO. Sin este chequeo el Invalid Date llega a pg, revienta el
+      // UPDATE y el correo queda sin marcar como procesado para siempre.
+      if (Number.isNaN(extractedDate?.getTime())) {
+        console.warn(`eventDate inválido descartado ("${raw}") para: ${subject}`);
+        extractedDate = null;
+      }
     }
 
     return { extractedDate, type: parsed.type || 'otro', summary: parsed.summary || null, model: AI_MODEL };

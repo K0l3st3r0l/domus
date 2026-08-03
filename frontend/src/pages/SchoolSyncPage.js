@@ -1,123 +1,18 @@
-import React, { useEffect, useState, useCallback, useMemo } from 'react';
-import { Button, Badge, Spinner, Alert, Modal, Form, OverlayTrigger, Tooltip } from 'react-bootstrap';
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
+import { Button, Badge, Spinner, Alert, Modal, Form } from 'react-bootstrap';
 import { toast } from 'react-toastify';
 import { useNavigate, useLocation } from 'react-router-dom';
 import apiClient from '../utils/apiClient';
 
-const KNOWN_CHILDREN = [
-  { email: 'anais_rehbein.ojeda@cicpm.cl', name: 'Anais' },
-  { email: 'gabriel_parra.ojeda@cicpm.cl', name: 'Gabriel' },
-];
-
-const CHILD_BADGE_COLORS = {
-  'anais_rehbein.ojeda@cicpm.cl': 'primary',
-  'gabriel_parra.ojeda@cicpm.cl': 'success',
-};
+// Los hijos salen de /school-sync/status (tabla children); antes estaban
+// hardcodeados acá y un hijo nuevo en la BD nunca aparecía en la UI.
+const BADGE_PALETTE = ['primary', 'success', 'info', 'warning'];
 
 const MEETING_RE = /reuni[oó]n|citaci[oó]n|convocatoria|acto oficial|ceremonia|entrevista/i;
 const MATERIALS_RE = /traer|materiales?|[uú]tiles?|llevar|implementos?|cuaderno|libros?\s|carpeta|l[aá]piz/i;
 
-const DAYS = ['Lu', 'Ma', 'Mi', 'Ju', 'Vi'];
 const DAY_NAMES = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes'];
 
-// Horarios actualizados con datos reales del colegio
-const SCHEDULE_TEMPLATES = {
-  'anais_rehbein.ojeda@cicpm.cl': [
-    // Lunes (0)
-    { day_of_week: 0, period_order: 1, subject: 'Matemática',       start_time: '07:45', end_time: '08:30' },
-    { day_of_week: 0, period_order: 2, subject: 'Matemática',       start_time: '08:30', end_time: '09:15' },
-    { day_of_week: 0, period_order: 3, subject: 'Historia',         start_time: '09:35', end_time: '10:20' },
-    { day_of_week: 0, period_order: 4, subject: 'Taller Lenguaje',  start_time: '10:20', end_time: '11:05' },
-    { day_of_week: 0, period_order: 5, subject: 'Religión',         start_time: '11:15', end_time: '12:00' },
-    { day_of_week: 0, period_order: 6, subject: 'Religión',         start_time: '12:00', end_time: '12:45' },
-    { day_of_week: 0, period_order: 7, subject: 'Música',           start_time: '13:40', end_time: '14:25' },
-    { day_of_week: 0, period_order: 8, subject: 'Música',           start_time: '14:25', end_time: '15:10' },
-    // Martes (1) - Horario diferido
-    { day_of_week: 1, period_order: 1, subject: 'Matemática',       start_time: '07:45', end_time: '08:30' },
-    { day_of_week: 1, period_order: 2, subject: 'Matemática',       start_time: '08:30', end_time: '09:10' },
-    { day_of_week: 1, period_order: 3, subject: 'Ed. Física',       start_time: '09:30', end_time: '10:10' },
-    { day_of_week: 1, period_order: 4, subject: 'Ed. Física',       start_time: '10:10', end_time: '10:50' },
-    { day_of_week: 1, period_order: 5, subject: 'Artes',            start_time: '11:00', end_time: '11:40' },
-    { day_of_week: 1, period_order: 6, subject: 'Artes',            start_time: '11:40', end_time: '12:20' },
-    { day_of_week: 1, period_order: 7, subject: 'Lenguaje',         start_time: '13:10', end_time: '13:50' },
-    { day_of_week: 1, period_order: 8, subject: 'Lenguaje',         start_time: '13:50', end_time: '14:30' },
-    // Miércoles (2)
-    { day_of_week: 2, period_order: 1, subject: 'Ciencias',         start_time: '07:45', end_time: '08:30' },
-    { day_of_week: 2, period_order: 2, subject: 'Taller Mat.',      start_time: '08:30', end_time: '09:15' },
-    { day_of_week: 2, period_order: 3, subject: 'Lenguaje',         start_time: '09:35', end_time: '10:20' },
-    { day_of_week: 2, period_order: 4, subject: 'Lenguaje',         start_time: '10:20', end_time: '11:05' },
-    { day_of_week: 2, period_order: 5, subject: 'Taller Lenguaje',  start_time: '11:15', end_time: '12:00' },
-    { day_of_week: 2, period_order: 6, subject: 'Ory/Cc',           start_time: '12:00', end_time: '12:45' },
-    { day_of_week: 2, period_order: 7, subject: 'Matemática',       start_time: '13:40', end_time: '14:25' },
-    { day_of_week: 2, period_order: 8, subject: 'Matemática',       start_time: '14:25', end_time: '15:10' },
-    // Jueves (3)
-    { day_of_week: 3, period_order: 1, subject: 'Ed. Física',       start_time: '07:45', end_time: '08:30' },
-    { day_of_week: 3, period_order: 2, subject: 'Ed. Física',       start_time: '08:30', end_time: '09:15' },
-    { day_of_week: 3, period_order: 3, subject: 'Taller Mat.',      start_time: '09:35', end_time: '10:20' },
-    { day_of_week: 3, period_order: 4, subject: 'Tecnología',       start_time: '10:20', end_time: '11:05' },
-    { day_of_week: 3, period_order: 5, subject: 'Lenguaje',         start_time: '11:15', end_time: '12:00' },
-    { day_of_week: 3, period_order: 6, subject: 'Lenguaje',         start_time: '12:00', end_time: '12:45' },
-    { day_of_week: 3, period_order: 7, subject: 'Inglés',           start_time: '13:40', end_time: '14:25' },
-    { day_of_week: 3, period_order: 8, subject: 'Inglés',           start_time: '14:25', end_time: '15:10' },
-    // Viernes (4)
-    { day_of_week: 4, period_order: 1, subject: 'Inglés',           start_time: '07:45', end_time: '08:30' },
-    { day_of_week: 4, period_order: 2, subject: 'Inglés',           start_time: '08:30', end_time: '09:15' },
-    { day_of_week: 4, period_order: 3, subject: 'Historia',         start_time: '09:35', end_time: '10:20' },
-    { day_of_week: 4, period_order: 4, subject: 'Historia',         start_time: '10:20', end_time: '11:05' },
-    { day_of_week: 4, period_order: 5, subject: 'Ciencias',         start_time: '11:15', end_time: '12:00' },
-    { day_of_week: 4, period_order: 6, subject: 'Ciencias',         start_time: '12:00', end_time: '12:45' },
-  ],
-  'gabriel_parra.ojeda@cicpm.cl': [
-    // Lunes (0)
-    { day_of_week: 0, period_order: 1, subject: 'Inglés',           start_time: '07:45', end_time: '08:30' },
-    { day_of_week: 0, period_order: 2, subject: 'Lenguaje',         start_time: '08:30', end_time: '09:15' },
-    { day_of_week: 0, period_order: 3, subject: 'Lenguaje',         start_time: '09:15', end_time: '10:00' },
-    { day_of_week: 0, period_order: 4, subject: 'Biología',         start_time: '10:20', end_time: '11:05' },
-    { day_of_week: 0, period_order: 5, subject: 'Biología',         start_time: '11:05', end_time: '11:50' },
-    { day_of_week: 0, period_order: 6, subject: 'PAES Mat.',        start_time: '12:00', end_time: '12:45' },
-    { day_of_week: 0, period_order: 7, subject: 'PAES Mat.',        start_time: '12:45', end_time: '13:30' },
-    { day_of_week: 0, period_order: 8, subject: 'PAES Lenguaje',    start_time: '13:30', end_time: '14:15' },
-    { day_of_week: 0, period_order: 9, subject: 'Matemática',       start_time: '15:15', end_time: '16:00' },
-    // Martes (1) - Horario diferido
-    { day_of_week: 1, period_order: 1, subject: 'Ory/Cc',           start_time: '07:45', end_time: '08:30' },
-    { day_of_week: 1, period_order: 2, subject: 'Historia',         start_time: '08:30', end_time: '09:10' },
-    { day_of_week: 1, period_order: 3, subject: 'Historia',         start_time: '09:10', end_time: '09:50' },
-    { day_of_week: 1, period_order: 4, subject: 'Física',           start_time: '10:10', end_time: '10:50' },
-    { day_of_week: 1, period_order: 5, subject: 'Física',           start_time: '10:50', end_time: '11:30' },
-    { day_of_week: 1, period_order: 6, subject: 'Lenguaje',         start_time: '11:40', end_time: '12:20' },
-    { day_of_week: 1, period_order: 7, subject: 'Matemática',       start_time: '12:20', end_time: '13:00' },
-    { day_of_week: 1, period_order: 8, subject: 'Matemática',       start_time: '13:00', end_time: '13:40' },
-    { day_of_week: 1, period_order: 9, subject: 'Química',          start_time: '14:30', end_time: '15:10' },
-    // Miércoles (2)
-    { day_of_week: 2, period_order: 1, subject: 'Física',           start_time: '07:45', end_time: '08:30' },
-    { day_of_week: 2, period_order: 2, subject: 'Lenguaje',         start_time: '08:30', end_time: '09:15' },
-    { day_of_week: 2, period_order: 3, subject: 'Lenguaje',         start_time: '09:15', end_time: '10:00' },
-    { day_of_week: 2, period_order: 4, subject: 'Ed. Física',       start_time: '10:20', end_time: '11:05' },
-    { day_of_week: 2, period_order: 5, subject: 'Ed. Física',       start_time: '11:05', end_time: '11:50' },
-    { day_of_week: 2, period_order: 6, subject: 'Historia',         start_time: '12:00', end_time: '12:45' },
-    { day_of_week: 2, period_order: 7, subject: 'Historia',         start_time: '12:45', end_time: '13:30' },
-    { day_of_week: 2, period_order: 8, subject: 'Inglés',           start_time: '13:30', end_time: '14:15' },
-    { day_of_week: 2, period_order: 9, subject: 'Religión',         start_time: '15:15', end_time: '16:00' },
-    // Jueves (3)
-    { day_of_week: 3, period_order: 1, subject: 'Matemática',       start_time: '07:45', end_time: '08:30' },
-    { day_of_week: 3, period_order: 2, subject: 'Tecnología',       start_time: '08:30', end_time: '09:15' },
-    { day_of_week: 3, period_order: 3, subject: 'Tecnología',       start_time: '09:15', end_time: '10:00' },
-    { day_of_week: 3, period_order: 4, subject: 'Inglés',           start_time: '10:20', end_time: '11:05' },
-    { day_of_week: 3, period_order: 5, subject: 'Inglés',           start_time: '11:05', end_time: '11:50' },
-    { day_of_week: 3, period_order: 6, subject: 'Artes/Música',     start_time: '12:00', end_time: '12:45' },
-    { day_of_week: 3, period_order: 7, subject: 'Artes/Música',     start_time: '12:45', end_time: '13:30' },
-    { day_of_week: 3, period_order: 8, subject: 'Ory/Cc',           start_time: '13:30', end_time: '14:15' },
-    { day_of_week: 3, period_order: 9, subject: 'Biología',         start_time: '15:15', end_time: '16:00' },
-    // Viernes (4)
-    { day_of_week: 4, period_order: 1, subject: 'Matemática',       start_time: '07:45', end_time: '08:30' },
-    { day_of_week: 4, period_order: 2, subject: 'Matemática',       start_time: '08:30', end_time: '09:15' },
-    { day_of_week: 4, period_order: 3, subject: 'Religión',         start_time: '09:15', end_time: '10:00' },
-    { day_of_week: 4, period_order: 4, subject: 'Química',          start_time: '10:20', end_time: '11:05' },
-    { day_of_week: 4, period_order: 5, subject: 'Química',          start_time: '11:05', end_time: '11:50' },
-    { day_of_week: 4, period_order: 6, subject: 'Lenguaje',         start_time: '12:00', end_time: '12:45' },
-    { day_of_week: 4, period_order: 7, subject: 'Lenguaje',         start_time: '12:45', end_time: '13:30' },
-  ],
-};
 
 const SUBJECT_COLORS = {
   'matematica':    '#e74c3c',
@@ -305,6 +200,7 @@ export default function SchoolSyncPage() {
   const navigate = useNavigate();
 
   const [connected, setConnected] = useState([]);
+  const [children, setChildren] = useState([]);
   const [emails, setEmails] = useState([]);
   const [assignments, setAssignments] = useState([]);
   const [activeFilter, setActiveFilter] = useState('all');
@@ -336,8 +232,19 @@ export default function SchoolSyncPage() {
   // Horarios
   const [schedules, setSchedules] = useState([]);
   const [showScheduleModal, setShowScheduleModal] = useState(false);
-  const [scheduleTab, setScheduleTab] = useState('anais_rehbein.ojeda@cicpm.cl');
+  const [scheduleTab, setScheduleTab] = useState(null);
   const [scheduleSaving, setScheduleSaving] = useState(false);
+
+  // Tareas/reuniones en curso, para no permitir doble envío al calendario
+  const [syncingToCalendar, setSyncingToCalendar] = useState(new Set());
+
+  // Los polls de sync/reprocess se reagendan con setTimeout; sin esto seguían
+  // corriendo (y llamando setState) después de salir de la página.
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   // Date range reprocessing
   const [dateFrom, setDateFrom] = useState('');
@@ -346,12 +253,32 @@ export default function SchoolSyncPage() {
   const [reprocessResult, setReprocessResult] = useState(null);
   const [reprocessProgress, setReprocessProgress] = useState(null);
 
+  const childName = useCallback(
+    (email) => children.find(c => c.email === email)?.name || email,
+    [children]
+  );
+  const childBadge = useCallback((email) => {
+    const idx = children.findIndex(c => c.email === email);
+    return idx === -1 ? 'secondary' : BADGE_PALETTE[idx % BADGE_PALETTE.length];
+  }, [children]);
+
   const fetchStatus = useCallback(async () => {
     try {
       const res = await apiClient.get('/school-sync/status');
       setConnected(res.data.connected || []);
     } catch {
       toast.error('Error obteniendo estado de School Sync');
+    }
+  }, []);
+
+  const fetchChildren = useCallback(async () => {
+    try {
+      const res = await apiClient.get('/school-sync/children');
+      const list = res.data.children || [];
+      setChildren(list);
+      setScheduleTab(prev => prev || list[0]?.email || null);
+    } catch {
+      toast.error('Error obteniendo la lista de hijos');
     }
   }, []);
 
@@ -381,8 +308,7 @@ export default function SchoolSyncPage() {
     const connectedEmail = params.get('connected');
     const errorParam = params.get('error');
     if (connectedEmail) {
-      const child = KNOWN_CHILDREN.find(c => c.email === connectedEmail);
-      toast.success(`✅ ${child?.name || connectedEmail} conectado correctamente`);
+      toast.success(`✅ ${childName(connectedEmail)} conectado correctamente`);
       navigate('/school-sync', { replace: true });
       // Refresh connected state after OAuth callback
       fetchStatus();
@@ -396,7 +322,7 @@ export default function SchoolSyncPage() {
       toast.error(messages[errorParam] || `Error: ${errorParam}`);
       navigate('/school-sync', { replace: true });
     }
-  }, [location.search, navigate, fetchStatus]);
+  }, [location.search, navigate, fetchStatus, childName]);
 
   // Auto-open email modal when arriving from calendar with ?openEmail=subject
   useEffect(() => {
@@ -429,47 +355,61 @@ export default function SchoolSyncPage() {
   }, [assignments, location.search, navigate]);
 
   useEffect(() => {
+    let poll = null;
+
     async function init() {
-      setLoading(true);
-      // status y data en paralelo — el backend controla visibilidad por user, no necesita esperar connected
       await Promise.all([
         fetchStatus(),
-        fetchData(activeFilter === 'all' ? null : activeFilter),
+        fetchChildren(),
         fetchSchedules(),
+        fetchData(activeFilter === 'all' ? null : activeFilter),
       ]);
       setLoading(false);
 
       // Retomar polling si hay un reprocesamiento en curso (ej: el usuario navegó fuera y volvió)
       try {
         const { data } = await apiClient.get('/school-sync/reprocess/progress');
-        if (data.running) {
-          setReprocessing(true);
-          const poll = setInterval(async () => {
-            try {
-              const { data: p } = await apiClient.get('/school-sync/reprocess/progress');
-              setReprocessProgress(p);
-              if (p.done || !p.running) {
-                clearInterval(poll);
-                setReprocessing(false);
-                if (p.done) {
-                  setReprocessResult({ processed: p.processed, eventsCreated: p.eventsCreated });
-                  fetchData();
-                }
+        if (!data.running || !mounted.current) return;
+        setReprocessing(true);
+        poll = setInterval(async () => {
+          try {
+            const { data: p } = await apiClient.get('/school-sync/reprocess/progress');
+            setReprocessProgress(p);
+            if (p.done || !p.running) {
+              clearInterval(poll);
+              setReprocessing(false);
+              if (p.done) {
+                setReprocessResult({ processed: p.processed, eventsCreated: p.eventsCreated });
+                fetchData(activeFilter === 'all' ? null : activeFilter);
               }
-            } catch { clearInterval(poll); setReprocessing(false); }
-          }, 1500);
-        }
+            }
+          } catch { clearInterval(poll); setReprocessing(false); }
+        }, 1500);
       } catch { /* non-critical */ }
     }
     init();
+
+    return () => { if (poll) clearInterval(poll); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // solo al montar
 
+  // El mount ya carga los datos en init(); sin este guard este efecto corría
+  // también al montar y duplicaba /emails y /assignments en cada visita.
+  const skipFilterFetch = useRef(true);
   useEffect(() => {
-    // re-fetch solo cuando cambia el filtro activo (no en el mount inicial, que lo maneja init)
+    if (skipFilterFetch.current) {
+      skipFilterFetch.current = false;
+      return;
+    }
     setSelectedIds(new Set());
+    setSelectedMeetingIds(new Set());
     fetchData(activeFilter === 'all' ? null : activeFilter);
   }, [activeFilter, fetchData]);
+
+  // Los filtros de tipo/materia esconden ítems; sin limpiar la selección el
+  // contador de "Agregar (N)" seguía contando tarjetas que ya no se ven.
+  useEffect(() => { setSelectedIds(new Set()); }, [courseFilter]);
+  useEffect(() => { setSelectedMeetingIds(new Set()); }, [typeFilter]);
 
   const handleConnect = async (child, force = false) => {
     setConnecting(child.email);
@@ -503,12 +443,14 @@ export default function SchoolSyncPage() {
       // Poll /sync/progress until done (max 3 min)
       const deadline = Date.now() + 3 * 60 * 1000;
       const poll = async () => {
+        if (!mounted.current) return;
         try {
           const { data } = await apiClient.get('/school-sync/sync/progress');
           setSyncProgressState({ pct: data.pct ?? 0, stepLabel: data.stepLabel || '' });
           if (data.done || !data.running || Date.now() > deadline) {
             await fetchStatus();
             await fetchData(activeFilter === 'all' ? null : activeFilter);
+            if (!mounted.current) return;
             if (data.error) {
               toast.error(`Error: ${data.error}`);
             } else {
@@ -520,16 +462,20 @@ export default function SchoolSyncPage() {
             setTimeout(poll, 2000);
           }
         } catch {
+          if (!mounted.current) return;
           setSyncing(false);
           setSyncProgressState(null);
           toast.error('Error consultando estado de sincronización');
         }
       };
       setTimeout(poll, 2000);
-    } catch {
-      toast.error('Error durante la sincronización');
+    } catch (err) {
       setSyncing(false);
       setSyncProgressState(null);
+      // 409 = otra sincronización ya en curso (otra pestaña, o doble clic)
+      toast.error(err.response?.status === 409
+        ? 'Ya hay una sincronización en curso'
+        : 'Error durante la sincronización');
     }
   };
 
@@ -547,6 +493,7 @@ export default function SchoolSyncPage() {
 
       // Poll progress every 1.5s until done
       const poll = async () => {
+        if (!mounted.current) return;
         try {
           const { data } = await apiClient.get('/school-sync/reprocess/progress');
           setReprocessProgress(data);
@@ -564,21 +511,23 @@ export default function SchoolSyncPage() {
             setTimeout(poll, 1500);
           }
         } catch {
+          if (!mounted.current) return;
           setReprocessing(false);
           toast.error('Error consultando progreso');
         }
       };
 
       setTimeout(poll, 1000);
-    } catch {
+    } catch (err) {
       setReprocessing(false);
-      toast.error('Error al iniciar reprocesamiento');
+      toast.error(err.response?.status === 409
+        ? 'Ya hay un reprocesamiento en curso'
+        : 'Error al iniciar reprocesamiento');
     }
   };
 
   const handleDisconnect = async (childEmail) => {
-    const child = KNOWN_CHILDREN.find(c => c.email === childEmail);
-    if (!window.confirm(`¿Desconectar la cuenta de ${child?.name || childEmail}?`)) return;
+    if (!window.confirm(`¿Desconectar la cuenta de ${childName(childEmail)}?`)) return;
     try {
       await apiClient.delete('/school-sync/disconnect', { data: { child_email: childEmail } });
       toast.success('Cuenta desconectada');
@@ -621,6 +570,8 @@ export default function SchoolSyncPage() {
   };
 
   const handleSyncToCalendar = async (assignment, suggestedDate = null) => {
+    if (syncingToCalendar.has(assignment.id)) return;
+    setSyncingToCalendar(prev => new Set(prev).add(assignment.id));
     try {
       const body = { assignmentId: assignment.id };
       if (suggestedDate) body.suggestedDate = suggestedDate.toISOString();
@@ -635,19 +586,23 @@ export default function SchoolSyncPage() {
     } catch (err) {
       const msg = err.response?.data?.error || 'Error al agregar al calendario';
       toast.error(msg);
+    } finally {
+      setSyncingToCalendar(prev => {
+        const next = new Set(prev);
+        next.delete(assignment.id);
+        return next;
+      });
     }
   };
 
   const handleLoadScheduleTemplate = async (childEmail) => {
-    const template = SCHEDULE_TEMPLATES[childEmail];
-    if (!template) return;
     setScheduleSaving(true);
     try {
-      await apiClient.post('/school-sync/schedules', { child_email: childEmail, schedule: template });
+      await apiClient.post('/school-sync/schedules/template', { child_email: childEmail });
       toast.success('Horario cargado correctamente');
       await fetchSchedules();
-    } catch {
-      toast.error('Error al guardar horario');
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Error al guardar horario');
     } finally {
       setScheduleSaving(false);
     }
@@ -669,12 +624,19 @@ export default function SchoolSyncPage() {
     setAddingBulk(true);
     try {
       const res = await apiClient.post('/school-sync/sync-to-calendar/bulk', { assignmentIds: ids });
-      const succeeded = res.data.results.filter(r => r.success).length;
-      const skipped = res.data.results.filter(r => r.skipped).length;
+      const results = res.data.results || [];
+      const succeeded = results.filter(r => r.success).length;
+      const skipped = results.filter(r => r.skipped).length;
+      const failed = results.filter(r => r.error);
       if (succeeded > 0) toast.success(`${succeeded} tarea(s) agregadas al calendario`);
       if (skipped > 0) toast.info(`${skipped} ya estaban en el calendario`);
+      if (failed.length > 0) toast.error(`${failed.length} tarea(s) no se pudieron agregar`);
+
+      // Solo marcar las que el backend confirmó; antes se marcaban todas las
+      // enviadas, incluidas las que fallaron.
+      const done = new Set(results.filter(r => r.success || r.skipped).map(r => r.id));
       setAssignments(prev =>
-        prev.map(a => ids.includes(a.id) ? { ...a, synced_to_calendar: true } : a)
+        prev.map(a => done.has(a.id) ? { ...a, synced_to_calendar: true } : a)
       );
       setSelectedIds(new Set());
     } catch {
@@ -706,17 +668,20 @@ export default function SchoolSyncPage() {
     if (!ids.length) return;
     setAddingMeetingsBulk(true);
     try {
-      let succeeded = 0;
-      const syncedIds = [];
-      for (const id of ids) {
-        await apiClient.post('/school-sync/sync-email-to-calendar', { emailId: id });
-        succeeded++;
-        syncedIds.push(id);
+      // Un fallo a mitad de camino no debe descartar las que sí se agregaron:
+      // se recorren todas y se marca lo confirmado.
+      const settled = await Promise.allSettled(
+        ids.map(id => apiClient.post('/school-sync/sync-email-to-calendar', { emailId: id }))
+      );
+      const syncedIds = ids.filter((_, i) => settled[i].status === 'fulfilled');
+      const failed = settled.length - syncedIds.length;
+
+      if (syncedIds.length > 0) {
+        toast.success(`${syncedIds.length} reunión(es) agregada(s) al calendario`);
+        const done = new Set(syncedIds);
+        setEmails(prev => prev.map(e => done.has(e.id) ? { ...e, synced_to_calendar: true } : e));
       }
-      if (succeeded > 0) {
-        toast.success(`${succeeded} reunión(es) agregada(s) al calendario`);
-        setEmails(prev => prev.map(e => syncedIds.includes(e.id) ? { ...e, synced_to_calendar: true } : e));
-      }
+      if (failed > 0) toast.error(`${failed} reunión(es) no se pudieron agregar`);
       setSelectedMeetingIds(new Set());
     } catch {
       toast.error('Error al agregar reuniones al calendario');
@@ -767,17 +732,28 @@ export default function SchoolSyncPage() {
 
   // For by-subject view: group assignments + related emails by course
   const subjectGroups = useMemo(() => {
+    // El texto de cada correo se normaliza una sola vez: antes se re-normalizaba
+    // dentro del filter, o sea cursos × correos veces por render.
+    const normalizedEmails = emails.map(e => ({
+      email: e,
+      text: normalizeCourse(`${e.subject || ''} ${e.snippet || ''} ${e.ai_summary || ''}`),
+    }));
+
+    const assignmentsByCourse = new Map();
+    for (const a of assignments) {
+      if (!assignmentsByCourse.has(a.course_name)) assignmentsByCourse.set(a.course_name, []);
+      assignmentsByCourse.get(a.course_name).push(a);
+    }
+
     return uniqueCourses.map(course => {
       // Emails from Classroom notifications embed the full course name in the snippet.
       // Match on the full normalized course name to avoid "Matemática" bleeding into
       // "Taller de Matemática" (which share the word "matem").
       const normalizedCourse = normalizeCourse(course);
-      const relatedEmails = emails.filter(e => {
-        const text = normalizeCourse(`${e.subject || ''} ${e.snippet || ''} ${e.ai_summary || ''}`);
-        return text.includes(normalizedCourse);
-      });
-      const courseAssignments = assignments.filter(a => a.course_name === course);
-      return { course, assignments: courseAssignments, emails: relatedEmails };
+      const relatedEmails = normalizedEmails
+        .filter(n => n.text.includes(normalizedCourse))
+        .map(n => n.email);
+      return { course, assignments: assignmentsByCourse.get(course) || [], emails: relatedEmails };
     }).filter(g => g.assignments.length > 0 || g.emails.length > 0);
   }, [uniqueCourses, assignments, emails]);
 
@@ -789,7 +765,11 @@ export default function SchoolSyncPage() {
     );
   }
 
-  if (connected.length === 0) {
+  // `connected` trae una fila por hijo registrado, con o sin cuenta Google
+  // vinculada: hay que filtrar por is_connected, no por largo del arreglo.
+  const linkedAccounts = connected.filter(c => c.is_connected);
+
+  if (linkedAccounts.length === 0) {
     return (
       <div style={{ maxWidth: 560, margin: '3rem auto', textAlign: 'center' }}>
         <div style={{ fontSize: '3rem', marginBottom: '0.5rem' }}>🎓</div>
@@ -806,7 +786,7 @@ export default function SchoolSyncPage() {
           </ul>
         </Alert>
         <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center', flexWrap: 'wrap' }}>
-          {KNOWN_CHILDREN.map(child => (
+          {children.map(child => (
             <Button
               key={child.email}
               variant="primary"
@@ -827,8 +807,8 @@ export default function SchoolSyncPage() {
     );
   }
 
-  const connectedEmails = connected.map(c => c.child_email);
-  const lastSync = connected.reduce((latest, c) => {
+  const connectedEmails = linkedAccounts.map(c => c.child_email);
+  const lastSync = linkedAccounts.reduce((latest, c) => {
     if (!c.last_sync) return latest;
     return !latest || new Date(c.last_sync) > new Date(latest) ? c.last_sync : latest;
   }, null);
@@ -853,7 +833,7 @@ export default function SchoolSyncPage() {
         <div>
           <h2 style={{ margin: 0 }}>🎓 School Sync</h2>
           <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.4rem', flexWrap: 'wrap' }}>
-            {KNOWN_CHILDREN.map(child => {
+            {children.map(child => {
               const isLinked = connectedEmails.includes(child.email);
               const info = connected.find(c => c.child_email === child.email);
               const isConnecting = connecting === child.email;
@@ -1036,7 +1016,7 @@ export default function SchoolSyncPage() {
             </button>
             {!filtersOpen && activeFilter !== 'all' && (
               <span style={{ fontSize: '0.75rem', color: 'var(--domus-muted)' }}>
-                {KNOWN_CHILDREN.find(c => c.email === activeFilter)?.name}
+                {childName(activeFilter)}
               </span>
             )}
             {!filtersOpen && courseFilter !== 'all' && (
@@ -1062,7 +1042,7 @@ export default function SchoolSyncPage() {
             {/* Row 1: hijo */}
             <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', alignItems: 'center' }}>
               <span style={{ fontSize: '0.75rem', color: 'var(--domus-muted)', alignSelf: 'center' }}>Hijo:</span>
-              {[{ key: 'all', label: 'Todos' }, ...KNOWN_CHILDREN.map(c => ({ key: c.email, label: c.name }))].map(f => (
+              {[{ key: 'all', label: 'Todos' }, ...children.map(c => ({ key: c.email, label: c.name }))].map(f => (
                 <Button key={f.key} size="sm"
                   variant={activeFilter === f.key ? 'primary' : 'outline-secondary'}
                   onClick={() => setActiveFilter(f.key)}
@@ -1301,6 +1281,7 @@ export default function SchoolSyncPage() {
               return (
                 <div
                   key={email.id}
+                  className="school-sync-card"
                   onClick={() => handleOpenEmail(email)}
                   style={{
                     padding: '0.75rem 1rem',
@@ -1311,8 +1292,6 @@ export default function SchoolSyncPage() {
                     cursor: 'pointer',
                     transition: 'border-color 0.15s, opacity 0.15s, background-color 0.15s',
                   }}
-                  onMouseEnter={e => e.currentTarget.style.opacity = '0.8'}
-                  onMouseLeave={e => e.currentTarget.style.opacity = '1'}
                 >
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '0.4rem', marginBottom: '0.2rem' }}>
                     {isMeeting && (
@@ -1360,7 +1339,7 @@ export default function SchoolSyncPage() {
                   <div style={{ fontSize: '0.72rem', color: 'var(--domus-muted)', marginTop: '0.35rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.5rem' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                       <span>{email.date ? timeAgo(email.date) : ''}</span>
-                      <Badge bg={CHILD_BADGE_COLORS[email.child_email] || 'secondary'}>{KNOWN_CHILDREN.find(c => c.email === email.child_email)?.name || email.child_email}</Badge>
+                      <Badge bg={childBadge(email.child_email)}>{childName(email.child_email)}</Badge>
                     </div>
                     <span style={{ color: 'var(--domus-primary)', fontStyle: 'italic' }}>→ leer</span>
                   </div>
@@ -1452,7 +1431,7 @@ export default function SchoolSyncPage() {
                 <p style={{ color: 'var(--domus-muted)' }}>No hay tareas pendientes próximas.</p>
               ) : (
             (showOverdue ? overdueAssignments : pendingAssignments).map(task => {
-              const childName = KNOWN_CHILDREN.find(c => c.email === task.child_email)?.name || task.child_email;
+              const taskChildName = childName(task.child_email);
               const due = formatDueDate(task.due_date);
               const overdue = task.due_date && new Date(task.due_date) < new Date();
               const hasMaterials = MATERIALS_RE.test(task.description || '');
@@ -1460,6 +1439,7 @@ export default function SchoolSyncPage() {
               return (
                 <div
                   key={task.id}
+                  className="school-sync-card"
                   onClick={() => setAssignmentModal(task)}
                   style={{
                     padding: '0.75rem 1rem',
@@ -1470,8 +1450,6 @@ export default function SchoolSyncPage() {
                     transition: 'border-color 0.15s, background-color 0.15s, opacity 0.15s',
                     cursor: 'pointer',
                   }}
-                  onMouseEnter={e => e.currentTarget.style.opacity = '0.8'}
-                  onMouseLeave={e => e.currentTarget.style.opacity = '1'}
                 >
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '0.5rem' }}>
                     <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-start', flex: 1 }}>
@@ -1500,7 +1478,7 @@ export default function SchoolSyncPage() {
                             Vence: {due}
                           </div>
                         )}
-                        <div style={{ fontSize: '0.72rem', marginTop: '0.2rem' }}><Badge bg={CHILD_BADGE_COLORS[task.child_email] || 'secondary'}>{childName}</Badge></div>
+                        <div style={{ fontSize: '0.72rem', marginTop: '0.2rem' }}><Badge bg={childBadge(task.child_email)}>{taskChildName}</Badge></div>
                         {hasMaterials && task.description && (
                           <div style={{ fontSize: '0.75rem', color: 'var(--domus-muted)', marginTop: '0.3rem', fontStyle: 'italic', borderTop: '1px solid var(--domus-border)', paddingTop: '0.3rem' }}>
                             {task.description.slice(0, 120)}{task.description.length > 120 ? '…' : ''}
@@ -1518,9 +1496,14 @@ export default function SchoolSyncPage() {
                         variant="outline-success"
                         title="Agregar al calendario"
                         style={{ padding: '0.2rem 0.5rem', fontSize: '0.8rem', whiteSpace: 'nowrap' }}
-                        onClick={() => handleSyncToCalendar(task)}
+                        disabled={syncingToCalendar.has(task.id)}
+                        // Sin stopPropagation el clic burbujea a la tarjeta y
+                        // abre además el modal de la tarea.
+                        onClick={(e) => { e.stopPropagation(); handleSyncToCalendar(task); }}
                       >
-                        📅 Agregar
+                        {syncingToCalendar.has(task.id)
+                          ? <Spinner size="sm" animation="border" />
+                          : '📅 Agregar'}
                       </Button>
                     )}
                   </div>
@@ -1553,7 +1536,7 @@ export default function SchoolSyncPage() {
               }}>
                 <strong>De:</strong><span>{emailModal.email.from_address}</span>
                 <strong>Fecha:</strong><span>{emailModal.email.date ? new Date(emailModal.email.date).toLocaleString('es-CL') : '—'}</span>
-                <strong>Para:</strong><Badge bg={CHILD_BADGE_COLORS[emailModal.email.child_email] || 'secondary'}>{KNOWN_CHILDREN.find(c => c.email === emailModal.email.child_email)?.name || emailModal.email.child_email}</Badge>
+                <strong>Para:</strong><Badge bg={childBadge(emailModal.email.child_email)}>{childName(emailModal.email.child_email)}</Badge>
               </div>
 
               {/* AI Summary block */}
@@ -1709,7 +1692,7 @@ export default function SchoolSyncPage() {
               }}>
                 <strong>Asignatura:</strong><span>{assignmentModal.course_name || '—'}</span>
                 <strong>Vence:</strong><span>{assignmentModal.due_date ? new Date(assignmentModal.due_date).toLocaleString('es-CL') : 'Sin fecha'}</span>
-                <strong>Para:</strong><span><Badge bg={CHILD_BADGE_COLORS[assignmentModal.child_email] || 'secondary'}>{KNOWN_CHILDREN.find(c => c.email === assignmentModal.child_email)?.name || assignmentModal.child_email}</Badge></span>
+                <strong>Para:</strong><span><Badge bg={childBadge(assignmentModal.child_email)}>{childName(assignmentModal.child_email)}</Badge></span>
               </div>
               {assignmentModal.description ? (
                 <div style={{
@@ -1811,13 +1794,13 @@ export default function SchoolSyncPage() {
         <Modal.Body style={{ backgroundColor: 'var(--domus-card-bg)', color: 'var(--domus-text)' }}>
           {/* Child selector */}
           <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.25rem' }}>
-            {KNOWN_CHILDREN.map(c => {
+            {children.map(c => {
               const hasSchedule = schedules.some(s => s.child_email === c.email);
               return (
                 <Button
                   key={c.email}
                   size="sm"
-                  variant={scheduleTab === c.email ? CHILD_BADGE_COLORS[c.email] === 'primary' ? 'primary' : 'success' : 'outline-secondary'}
+                  variant={scheduleTab === c.email ? childBadge(c.email) : 'outline-secondary'}
                   onClick={() => setScheduleTab(c.email)}
                   style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}
                 >
@@ -1831,7 +1814,7 @@ export default function SchoolSyncPage() {
           {/* Schedule content for selected child */}
           {(() => {
             const childSchedule = schedules.filter(s => s.child_email === scheduleTab);
-            const childInfo = KNOWN_CHILDREN.find(c => c.email === scheduleTab);
+            const childInfo = children.find(c => c.email === scheduleTab);
             const maxPeriod = childSchedule.reduce((m, s) => Math.max(m, Number(s.period_order)), 0);
 
             if (childSchedule.length === 0) {
@@ -1844,13 +1827,13 @@ export default function SchoolSyncPage() {
                   <Button
                     variant="primary"
                     onClick={() => handleLoadScheduleTemplate(scheduleTab)}
-                    disabled={scheduleSaving}
+                    disabled={scheduleSaving || !childInfo?.has_template}
                   >
                     {scheduleSaving
                       ? <><Spinner size="sm" animation="border" className="me-2" />Cargando...</>
                       : `Cargar horario de ${childInfo?.name} desde imagen`}
                   </Button>
-                  {!SCHEDULE_TEMPLATES[scheduleTab] && (
+                  {!childInfo?.has_template && (
                     <p style={{ color: 'var(--domus-muted)', fontSize: '0.82rem', marginTop: '0.75rem' }}>
                       No hay horario predefinido para este hijo.
                     </p>
@@ -1929,7 +1912,7 @@ export default function SchoolSyncPage() {
                     variant="outline-primary"
                     size="sm"
                     onClick={() => handleLoadScheduleTemplate(scheduleTab)}
-                    disabled={scheduleSaving}
+                    disabled={scheduleSaving || !childInfo?.has_template}
                   >
                     {scheduleSaving
                       ? <><Spinner size="sm" animation="border" className="me-1" />Guardando...</>
